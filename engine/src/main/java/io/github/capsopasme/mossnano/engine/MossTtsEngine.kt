@@ -39,6 +39,7 @@ class MossTtsEngine private constructor(
 
     private val env: OrtEnvironment = OrtEnv.get(options.lmThreads, options.allowSpinning)
 
+    private val prefillOptions = prefillSessionOptions(options.prefillThreads, options.lmThreads, options.allowSpinning)
     private val lmDynamicOptions = lmSessionOptions(options.lmThreads, options.allowSpinning, dynamicShapes = true)
     private val lmStaticOptions = lmSessionOptions(options.lmThreads, options.allowSpinning, dynamicShapes = false)
     private val codecOptions = codecSessionOptions(options.codecThreads)
@@ -91,7 +92,7 @@ class MossTtsEngine private constructor(
 
     init {
         val t0 = System.nanoTime()
-        prefill = env.openSession(File(cfg.ttsDir, cfg.prefillFile), lmDynamicOptions)
+        prefill = env.openSession(File(cfg.ttsDir, cfg.prefillFile), prefillOptions)
         decode = env.openSession(File(cfg.ttsDir, cfg.decodeStepFile), lmDynamicOptions)
         local = env.openSession(File(cfg.ttsDir, cfg.localFixedFrameFile), lmStaticOptions)
         codecSession = env.openSession(File(cfg.codecDir, cfg.codec.decodeStepFile), codecOptions)
@@ -134,7 +135,7 @@ class MossTtsEngine private constructor(
             priority = Thread.MAX_PRIORITY
             start()
         }
-        log("engine loaded in ${loadMs}ms; globalPool=${OrtEnv.hasGlobalPool} lmThreads=${OrtEnv.globalThreads} codecThreads=${options.codecThreads}")
+        log("engine loaded in ${loadMs}ms; globalPool=${OrtEnv.hasGlobalPool} lmThreads=${OrtEnv.globalThreads} prefillThreads=${options.prefillThreads} codecThreads=${options.codecThreads} perfCores=${CpuAffinity.performanceCores}")
     }
 
     private fun shapeOfRank(rank: Int, h: Int): LongArray =
@@ -520,7 +521,7 @@ class MossTtsEngine private constructor(
         val encodeFile = cfg.codec.encodeFile ?: throw MissingModelException("codec meta has no encode graph")
         synthLock.withLock {
             check(!closed) { "engine closed" }
-            val opts = codecSessionOptions(options.lmThreads)
+            val opts = codecSessionOptions(maxOf(options.prefillThreads, options.lmThreads))
             CpuAffinity.onPerformanceCores(options.pinToPerformanceCores) { opts.use {
                 env.openSession(File(cfg.codecDir, encodeFile), opts).use { enc ->
                     val ch = cfg.codec.channels
@@ -561,6 +562,7 @@ class MossTtsEngine private constructor(
             listOf(hiddenLocalIn, hiddenDecodeOut, seenMaskTensor, assistantUTensor, audioUTensor, rowTensor, pastLenTensor)
                 .forEach { runCatching { it.close() } }
             listOf(prefill, decode, local, codecSession).forEach { runCatching { it.close() } }
+            prefillOptions.close()
             lmDynamicOptions.close()
             lmStaticOptions.close()
             codecOptions.close()

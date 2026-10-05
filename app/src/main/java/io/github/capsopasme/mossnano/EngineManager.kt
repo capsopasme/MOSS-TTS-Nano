@@ -101,6 +101,7 @@ object EngineManager {
                 EngineOptions(
                     modelRoot = ModelStore.root(app, variant),
                     lmThreads = settings.lmThreads,
+                    prefillThreads = settings.prefillThreads,
                     codecThreads = settings.codecThreads,
                     allowSpinning = settings.spinning,
                 ),

@@ -23,39 +23,62 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v5
 
-      - name: Decode signing key
+      - name: Resolve signing key
+        # Accepts the usual secret names (SIGNING_KEYSTORE_BASE64 / KEYSTORE_BASE64 / SIGNING_KEY …),
+        # so the workflow works with whatever naming the secrets were created with. Only secret
+        # *names* are ever printed; values are masked.
+        if: github.event_name != 'pull_request'
         env:
-          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          ALL_SECRETS: ${{ toJSON(secrets) }}
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            # tolerate line-wrapped base64 (e.g. `base64 release.jks` without -w0)
-            echo "$KEYSTORE_BASE64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
-            missing=""
-            [ -n "$SIGNING_STORE_PASSWORD" ] || missing="$missing SIGNING_STORE_PASSWORD"
-            [ -n "$SIGNING_KEY_ALIAS" ] || missing="$missing SIGNING_KEY_ALIAS"
-            [ -n "$SIGNING_KEY_PASSWORD" ] || missing="$missing SIGNING_KEY_PASSWORD"
-            if [ -n "$missing" ]; then echo "::error title=signing::missing secrets:$missing"; exit 1; fi
-            # Check the store/alias/password before Gradle so a typo gives a readable error.
-            if ! keytool -list -keystore "$RUNNER_TEMP/release.jks" -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_KEY_ALIAS" >/dev/null 2>"$RUNNER_TEMP/kt.err"; then
-              echo "::error title=signing::keystore check failed: $(head -c 300 "$RUNNER_TEMP/kt.err" | tr '\n' ' ')"
+          pick() {
+            for k in "$@"; do
+              v=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$k" 'to_entries[] | select((.key | ascii_upcase) == $k) | .value' | head -c 1000000)
+              if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+            done
+            return 0
+          }
+          NAMES=$(printf '%s' "$ALL_SECRETS" | jq -r 'keys | map(select(. != "github_token")) | join(", ")')
+          KS=$(pick SIGNING_KEYSTORE_BASE64 KEYSTORE_BASE64 ANDROID_KEYSTORE_BASE64 RELEASE_KEYSTORE_BASE64 KEYSTORE_B64 \
+                    SIGNING_KEYSTORE KEY_STORE_BASE64 RELEASE_KEYSTORE ANDROID_KEYSTORE APP_KEYSTORE_BASE64 KEYSTORE KEY_STORE \
+                    SIGNING_KEY_BASE64 SIGNING_KEY)
+          if [ -z "$KS" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "::error title=signing::no keystore secret found (visible secret names: ${NAMES:-none}); refusing to publish a debug-signed APK"
               exit 1
             fi
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "::error title=signing::release tag without SIGNING_KEYSTORE_BASE64 secret: refusing to publish a debug-signed APK"
-            exit 1
-          else
-            echo "::notice title=signing::no release key configured, APK is signed with the debug key"
+            echo "::notice title=signing::no keystore secret found (visible secret names: ${NAMES:-none}); APK is signed with the debug key"
+            exit 0
           fi
+          SP=$(pick SIGNING_STORE_PASSWORD KEYSTORE_PASSWORD KEY_STORE_PASSWORD STORE_PASSWORD RELEASE_STORE_PASSWORD \
+                    SIGNING_KEYSTORE_PASSWORD ANDROID_KEYSTORE_PASSWORD SIGNING_PASSWORD)
+          AL=$(pick SIGNING_KEY_ALIAS KEY_ALIAS ALIAS RELEASE_KEY_ALIAS KEYSTORE_ALIAS SIGNING_ALIAS ANDROID_KEY_ALIAS)
+          KP=$(pick SIGNING_KEY_PASSWORD KEY_PASSWORD RELEASE_KEY_PASSWORD KEYSTORE_KEY_PASSWORD ANDROID_KEY_PASSWORD)
+          [ -n "$KP" ] || KP="$SP"   # PKCS12 stores use one password for both
+          for v in "$SP" "$KP" "$AL"; do [ -n "$v" ] && echo "::add-mask::$v"; done
+          # tolerate line-wrapped base64 (e.g. `base64 release.jks` without -w0)
+          if ! printf '%s' "$KS" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/release.jks" 2>/dev/null || [ ! -s "$RUNNER_TEMP/release.jks" ]; then
+            echo "::error title=signing::keystore secret is not valid base64 (secret names: $NAMES)"; exit 1
+          fi
+          if [ -z "$SP" ]; then echo "::error title=signing::no keystore password secret found (secret names: $NAMES)"; exit 1; fi
+          if [ -z "$AL" ]; then
+            # single-entry keystore: use its alias
+            AL=$(keytool -list -v -keystore "$RUNNER_TEMP/release.jks" -storepass "$SP" 2>/dev/null | sed -n 's/^Alias name: //p')
+            [ "$(printf '%s\n' "$AL" | grep -c .)" = 1 ] || { echo "::error title=signing::no key alias secret and the keystore has $(printf '%s\n' "$AL" | grep -c .) entries (secret names: $NAMES)"; exit 1; }
+          fi
+          if ! keytool -list -keystore "$RUNNER_TEMP/release.jks" -storepass "$SP" -alias "$AL" >/dev/null 2>"$RUNNER_TEMP/kt.err"; then
+            echo "::error title=signing::keystore/password/alias check failed: $(head -c 300 "$RUNNER_TEMP/kt.err" | tr '\n' ' ') (secret names: $NAMES)"
+            exit 1
+          fi
+          {
+            echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/release.jks"
+            echo "SIGNING_STORE_PASSWORD=$SP"
+            echo "SIGNING_KEY_ALIAS=$AL"
+            echo "SIGNING_KEY_PASSWORD=$KP"
+          } >> "$GITHUB_ENV"
+          echo "::notice title=signing::release key found (secret names: $NAMES)"
 
       - name: Build release APK
-        env:
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           set -o pipefail

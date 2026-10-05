@@ -23,9 +23,11 @@ fun main(args: Array<String>) {
     val text = args.getOrNull(3) ?: "你好，这是端侧流式语音合成的量化验证。今天天气不错，我们出去走走吧。"
     val voiceId = args.getOrNull(4)
     val threads = (System.getenv("LM_THREADS") ?: "2").toInt()
+    val prefillThreads = (System.getenv("PREFILL_THREADS") ?: "4").toInt()
+    val codecThreads = (System.getenv("CODEC_THREADS") ?: "1").toInt()
 
     val engine = MossTtsEngine.load(
-        EngineOptions(root, lmThreads = threads, codecThreads = 1),
+        EngineOptions(root, lmThreads = threads, prefillThreads = prefillThreads, codecThreads = codecThreads),
         tokenizerFactory = { SpmTokenizer(it) },
         log = { println("[log] $it") },
     )

@@ -78,6 +78,26 @@ internal fun lmSessionOptions(threadsIfNoGlobalPool: Int, spinning: Boolean, dyn
         addConfigEntry("session.inter_op.allow_spinning", "0")
     }
 
+/**
+ * Prefill runs once per text chunk on a big batch of rows (compute-bound GEMMs), so it gets its
+ * own, wider pool. Its threads never spin, so they cost nothing between chunks and don't compete
+ * with the (small, spinning) per-frame pool. threads <= 0 -> share the LM pool instead.
+ */
+internal fun prefillSessionOptions(threads: Int, lmThreads: Int, spinning: Boolean): OrtSession.SessionOptions =
+    if (threads <= 0 || threads == lmThreads) {
+        lmSessionOptions(lmThreads, spinning, dynamicShapes = true)
+    } else {
+        OrtSession.SessionOptions().apply {
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+            setMemoryPatternOptimization(false)
+            setIntraOpNumThreads(threads)
+            setInterOpNumThreads(1)
+            addConfigEntry("session.intra_op.allow_spinning", "0")
+            addConfigEntry("session.inter_op.allow_spinning", "0")
+        }
+    }
+
 /** Codec runs concurrently with the LM on its own small pool, never spinning. */
 internal fun codecSessionOptions(threads: Int): OrtSession.SessionOptions =
     OrtSession.SessionOptions().apply {

@@ -20,10 +20,18 @@ class AppSettings(context: Context) {
         get() = runCatching { ModelVariant.valueOf(prefs.getString("variant", null)!!) }.getOrDefault(ModelVariant.FP32)
         set(v) = prefs.edit().putString("variant", v.name).apply()
 
-    /** Shared LM pool size. Fixed per process (ORT global thread pool), applied on next start. */
+    /**
+     * Per-frame LM pool size (decode_step + local graphs). Fixed per process (ORT global thread
+     * pool), applied on next start. 2 is the sweet spot for one-row GEMVs (see EngineOptions).
+     */
     var lmThreads: Int
-        get() = prefs.getInt("lmThreads", 4)
-        set(v) = prefs.edit().putInt("lmThreads", v.coerceIn(1, 8)).apply()
+        get() = prefs.getInt("lmThreads2", 2)
+        set(v) = prefs.edit().putInt("lmThreads2", v.coerceIn(1, 8)).apply()
+
+    /** Prefill pool size (one batch GEMM per text chunk -> first-audio latency). */
+    var prefillThreads: Int
+        get() = prefs.getInt("prefillThreads", 4)
+        set(v) = prefs.edit().putInt("prefillThreads", v.coerceIn(1, 8)).apply()
 
     var codecThreads: Int
         get() = prefs.getInt("codecThreads", 2)

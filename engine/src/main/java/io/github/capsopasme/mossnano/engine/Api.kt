@@ -8,8 +8,15 @@ import java.util.concurrent.CopyOnWriteArrayList
 class EngineOptions(
     /** Directory containing MOSS-TTS-Nano-100M-ONNX/ and MOSS-Audio-Tokenizer-Nano-ONNX/. */
     val modelRoot: File,
-    /** Threads of the shared LM pool (prefill/decode/local). 4 = X4 + 3×A720 on SD 8 Gen 3. */
-    val lmThreads: Int = 4,
+    /**
+     * Threads of the shared, spinning pool that runs the per-frame graphs (decode_step + local).
+     * Per frame these are GEMVs (one row): past 2 threads the synchronisation between ops costs
+     * more than the extra cores bring (measured on ARMv9: 1 -> 2 threads is ~1.35x faster,
+     * 4 threads is slower than 2), and every extra spinning thread burns a core.
+     */
+    val lmThreads: Int = 2,
+    /** Threads of prefill's own (non-spinning) pool; prefill is a compute-bound batch GEMM. 0 = use the LM pool. */
+    val prefillThreads: Int = 4,
     /** Threads of the codec pool; it runs concurrently with the LM. */
     val codecThreads: Int = 2,
     /** Let LM pool threads spin between graph calls (lower latency, a bit more power). */

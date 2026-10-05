@@ -374,6 +374,7 @@ private fun CloneCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
 private fun PerfCard(settings: AppSettings) {
     val context = LocalContext.current
     var lm by remember { mutableIntStateOf(settings.lmThreads) }
+    var prefill by remember { mutableIntStateOf(settings.prefillThreads) }
     var codec by remember { mutableIntStateOf(settings.codecThreads) }
     var spin by remember { mutableStateOf(settings.spinning) }
     var normalize by remember { mutableStateOf(settings.normalize) }
@@ -382,8 +383,11 @@ private fun PerfCard(settings: AppSettings) {
     var needRestart by remember { mutableStateOf(EngineManager.threadsNeedRestart(settings)) }
 
     SectionCard("性能与设置") {
-        LabeledSlider("LM 线程 $lm（骁龙 8 Gen3 推荐 4 = 1 超大核 + 3 大核）", lm.toFloat(), 1f..8f, 6) {
+        LabeledSlider("逐帧 LM 线程 $lm（推荐 2：单行矩阵向量乘，线程多了同步开销反而更慢、更费电）", lm.toFloat(), 1f..6f, 4) {
             lm = it.toInt(); settings.lmThreads = lm; needRestart = EngineManager.threadsNeedRestart(settings)
+        }
+        LabeledSlider("Prefill 线程 $prefill（每段文本一次的大矩阵乘，影响首音延迟）", prefill.toFloat(), 1f..6f, 4, onFinished = { EngineManager.releaseAsync() }) {
+            prefill = it.toInt(); settings.prefillThreads = prefill
         }
         LabeledSlider("Codec 线程 $codec（与 LM 并行）", codec.toFloat(), 1f..4f, 2, onFinished = { EngineManager.releaseAsync() }) {
             codec = it.toInt(); settings.codecThreads = codec
