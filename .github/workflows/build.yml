@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -39,7 +39,17 @@ jobs:
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon :app:assembleRelease
+          set -o pipefail
+          if ! ./gradlew --no-daemon :app:assembleRelease 2>&1 | tee build.log; then
+            # Surface the real errors as annotations (readable via the API, not just raw logs).
+            grep -E "^e: |error:|What went wrong|Could not |> [A-Z].*(failed|Failed|error)|FAILED|Exception" build.log \
+              | grep -v "^\s*at " | head -60 > errors.txt || true
+            split -l 6 errors.txt err_ || true
+            for f in err_*; do
+              [ -f "$f" ] && echo "::error title=build::$(sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' "$f")"
+            done
+            exit 1
+          fi
           mkdir -p dist
           cp app/build/outputs/apk/release/app-release.apk dist/MossTtsNano-${GITHUB_SHA::7}.apk
 
@@ -60,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
