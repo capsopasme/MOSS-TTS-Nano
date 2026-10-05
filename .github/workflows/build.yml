@@ -12,9 +12,28 @@ permissions:
 
 jobs:
   apk:
+    # a release is only published if the engine tests pass
+    needs: engine-mock-test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+
+      - name: Release context
+        # A release is built for a pushed v* tag, or for a push to main whose head commit message
+        # contains "[release]" (tag v<versionName> is then created by the publish step).
+        env:
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          TAG=""
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$HEAD_MSG" == *"[release]"* ]]; then
+            TAG="v$VERSION"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          [ -n "$TAG" ] && echo "::notice title=release::building release $TAG" || true
 
       - uses: actions/setup-java@v5
         with:
@@ -85,7 +104,7 @@ jobs:
           # (command substitution runs in a subshell: recompute the list of names that are set)
           SET=""; for k in SIGNING_KEYSTORE_BASE64 KEYSTORE_BASE64 ANDROID_KEYSTORE_BASE64 RELEASE_KEYSTORE_BASE64 KEYSTORE_B64 SIGNING_KEYSTORE KEY_STORE_BASE64 RELEASE_KEYSTORE ANDROID_KEYSTORE KEYSTORE KEY_STORE KEYSTORE_FILE SIGNING_KEY_BASE64 SIGNING_KEY SIGNING_STORE_PASSWORD KEYSTORE_PASSWORD KEY_STORE_PASSWORD STORE_PASSWORD RELEASE_STORE_PASSWORD SIGNING_KEYSTORE_PASSWORD ANDROID_KEYSTORE_PASSWORD SIGNING_PASSWORD SIGNING_KEY_ALIAS KEY_ALIAS ALIAS RELEASE_KEY_ALIAS KEYSTORE_ALIAS SIGNING_ALIAS ANDROID_KEY_ALIAS SIGNING_KEY_PASSWORD KEY_PASSWORD RELEASE_KEY_PASSWORD KEYSTORE_KEY_PASSWORD ANDROID_KEY_PASSWORD SIGN_KEY_BASE64 SIGN_KEY_PWD RELEASE_KEYSTORE_PASSWORD SIGN_KEY_PASSWORD SIGN_STORE_PASSWORD SIGN_KEY_ALIAS; do v="S_$k"; if [ -n "${!v:-}" ]; then SET="$SET $k"; fi; done
           if [ -z "$KS" ]; then
-            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [ -n "$RELEASE_TAG" ]; then
               echo "::error title=signing::no keystore secret found (signing-related secrets set:${SET:- none}); refusing to publish a debug-signed APK"
               exit 1
             fi
@@ -131,9 +150,8 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
           NAME="MossTtsNano-${VERSION}-${GITHUB_SHA::7}.apk"
-          [[ "$GITHUB_REF" == refs/tags/v* ]] && NAME="MossTtsNano-${GITHUB_REF_NAME}.apk"
+          if [ -n "$RELEASE_TAG" ]; then NAME="MossTtsNano-${RELEASE_TAG}.apk"; fi
           cp app/build/outputs/apk/release/app-release.apk "dist/$NAME"
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
 
@@ -146,7 +164,7 @@ jobs:
           DN=$(grep -m1 "certificate DN" certs.txt | sed 's/.*DN: //')
           SHA=$(grep -m1 "certificate SHA-256 digest" certs.txt | sed 's/.*digest: //')
           echo "::notice title=apk signer::$DN | SHA-256 $SHA | $(du -h "$APK" | cut -f1)"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "$DN" | grep -q "CN=Android Debug"; then
+          if [ -n "$RELEASE_TAG" ] && echo "$DN" | grep -q "CN=Android Debug"; then
             echo "::error title=signing::release APK is debug-signed"; exit 1
           fi
           # The APK must contain the native libs the app needs.
@@ -157,20 +175,20 @@ jobs:
           name: MossTtsNano-apk
           path: dist/
 
-      - name: Publish release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish release
+        if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          NOTES_FILE=""
-          if [ -f "docs/release-notes/${GITHUB_REF_NAME}.md" ]; then NOTES_FILE="docs/release-notes/${GITHUB_REF_NAME}.md"; fi
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          elif [ -n "$NOTES_FILE" ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file "$NOTES_FILE" --latest
+          NOTES="docs/release-notes/${RELEASE_TAG}.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          elif [ -f "$NOTES" ]; then
+            gh release create "$RELEASE_TAG" dist/* --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes-file "$NOTES" --latest
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --latest
+            gh release create "$RELEASE_TAG" dist/* --target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes --latest
           fi
+          echo "::notice title=release::published $RELEASE_TAG ($(ls dist/*.apk | xargs -n1 basename))"
 
   engine-mock-test:
     # Runs the real engine code on a desktop JVM against mock ONNX graphs with the exact

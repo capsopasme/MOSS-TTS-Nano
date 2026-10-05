@@ -119,7 +119,7 @@ bash tools/mock/run_real_model.sh <模型目录> out.wav    # 真实模型（FP3
 
 ## 发布
 
-推送 `v*` tag 会构建并发布 APK。签名用仓库 secrets（`SIGN_KEY_BASE64` / `SIGN_KEY_PWD` / `SIGN_KEY_ALIAS`，也认 `SIGNING_KEYSTORE_BASE64`、`RELEASE_KEYSTORE_BASE64` 等常见命名）；tag 构建找不到 release key 时会直接失败，不会发布 debug 签名的 APK。release 附带 `SHA256SUMS.txt`，签名证书指纹写在 workflow 的 annotations 里。
+推送 `v*` tag，或推送一个提交信息里带 `[release]` 的提交到 main（自动创建 `v<versionName>` tag），会构建并发布 APK，release 说明取自 `docs/release-notes/<tag>.md`。签名用仓库 secrets（`SIGN_KEY_BASE64` / `SIGN_KEY_PWD` / `SIGN_KEY_ALIAS`，也认 `SIGNING_KEYSTORE_BASE64`、`RELEASE_KEYSTORE_BASE64` 等常见命名）；tag 构建找不到 release key 时会直接失败，不会发布 debug 签名的 APK。release 附带 `SHA256SUMS.txt`，签名证书指纹写在 workflow 的 annotations 里。
 
 ## 致谢 / 许可
 
