@@ -60,7 +60,7 @@ jobs:
 
       - name: Quantize
         run: |
-          python tools/quantize_int8.py work
+          EXPERIMENTS=1 python tools/quantize_int8.py work
           echo "::notice title=quantize::$(cat work/quantize_report.json | tr -d '\n ')"
 
       - name: Check against FP32 (lossless surgery + quantization error)
@@ -103,6 +103,12 @@ jobs:
           path: work/out/
           retention-days: 3
 
+      - uses: actions/upload-artifact@v5
+        with:
+          name: int8-experiments
+          path: work/exp/
+          retention-days: 3
+
       - name: Publish release assets
         if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[publish-int8]')
         env:
@@ -139,6 +145,20 @@ jobs:
           name: int8-pack
           path: models/int8new
 
+      - uses: actions/download-artifact@v5
+        with:
+          name: int8-experiments
+          path: exp
+
+      - name: Assemble experiment packs (int8new with a mixed-precision local graph)
+        run: |
+          for d in exp/*/; do
+            n=$(basename "$d")
+            cp -r models/int8new "models/exp_$n"
+            cp "$d/moss_tts_local_fixed_sampled_frame.onnx" "models/exp_$n/MOSS-TTS-Nano-100M-ONNX/"
+          done
+          ls models
+
       - name: Download FP32 + previous INT8 pack
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,7 +167,7 @@ jobs:
           from huggingface_hub import snapshot_download
           snapshot_download("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", revision="f52645cb467506d8e18e746ddd59482685b74e58", local_dir="models/fp32/MOSS-TTS-Nano-100M-ONNX",
                             allow_patterns=["*.json", "tokenizer.model", "moss_tts_prefill.onnx", "moss_tts_decode_step.onnx",
-                                            "moss_tts_local_fixed_sampled_frame.onnx", "*shared.data"])
+                                            "moss_tts_local_fixed_sampled_frame.onnx", "moss_tts_local_cached_step.onnx", "*shared.data"])
           snapshot_download("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", revision="ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae", local_dir="models/fp32/MOSS-Audio-Tokenizer-Nano-ONNX",
                             allow_patterns=["*.json", "moss_audio_tokenizer_decode_step.onnx", "moss_audio_tokenizer_decode_shared.data"])
           PY
@@ -161,15 +181,24 @@ jobs:
       - name: Graph benchmark (ARM64)
         run: |
           echo "cpu: $(nproc) x $(lscpu | grep -m1 'Model name' | sed 's/.*: *//') flags: $(grep -m1 Features /proc/cpuinfo | grep -oE 'asimddp|i8mm|sve2|bf16' | tr '\n' ' ')"
-          for pack in fp32 int8old int8new; do
+          for pack in fp32 int8old int8new $(cd models && ls -d exp_* 2>/dev/null); do
             [ -f "models/$pack/MOSS-TTS-Nano-100M-ONNX/moss_tts_local_fixed_sampled_frame.onnx" ] || continue
-            threads="1 2 4"; [ "$pack" = int8new ] && threads="1 2 3 4"
+            threads="1 2 4"; [ "$pack" = int8new ] && threads="1 2 3 4"; [[ "$pack" == exp_* ]] && threads="2"
             for t in $threads; do
               r=$(python tools/bench_onnx.py "models/$pack" $t 80)
               echo "$r"
               echo "::notice title=arm64 $pack t=$t::$r"
             done
           done
+
+      - name: Quality vs FP32 on ARM64 (the phone's int8 kernels; x86 AVX2 kernels saturate differently)
+        run: |
+          args="int8new=models/int8new"
+          [ -f models/int8old/MOSS-TTS-Nano-100M-ONNX/moss_tts_local_fixed_sampled_frame.onnx ] && args="int8old=models/int8old $args"
+          for e in $(cd models && ls -d exp_* 2>/dev/null); do args="$args $e=models/$e"; done
+          r=$(QUALITY_SEEDS=4 python tools/quality_int8.py models/fp32 $args)
+          echo "$r"
+          echo "::notice title=quality arm64::$r"
 
       - name: Engine end to end on ARM64 (Kotlin engine, real graphs)
         run: |

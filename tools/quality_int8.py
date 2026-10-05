@@ -22,6 +22,7 @@ import onnxruntime as ort
 
 PENALTY = 1.2
 TEMPERATURE = 0.8
+SEEDS = [1234 + 1111 * i for i in range(int(os.environ.get("QUALITY_SEEDS", "2")))]
 
 
 def sess(path):
@@ -143,14 +144,18 @@ def main():
     for name, pack in runs.items():
         nlls, lens = [], []
         for ci, rows in enumerate(cases):
-            for seed in (1234, 4321):
+            for seed in SEEDS:
                 frames = generate(pack, man, rows, seed, 260)
                 lens.append(len(frames))
                 nlls.append(score(ref, man, rows, frames))
-        result[name] = {"fp32_nll_per_token": round(float(np.mean(nlls)), 4), "frames": lens}
+        result[name] = {"fp32_nll_per_token": round(float(np.mean(nlls)), 4), "frames": lens, "_runs": nlls}
     base = result["fp32"]["fp32_nll_per_token"]
+    base_runs = np.asarray(result["fp32"]["_runs"])
     for name in result:
+        runs = np.asarray(result[name].pop("_runs"))
         result[name]["delta_vs_fp32"] = round(result[name]["fp32_nll_per_token"] - base, 4)
+        # paired by (prompt, seed): spread of the per-run differences
+        result[name]["delta_runs_std"] = round(float(np.std(runs - base_runs)), 4)
     print(json.dumps(result))
 
 

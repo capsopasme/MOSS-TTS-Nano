@@ -190,6 +190,29 @@ def matmul_coverage(model_path):
     return fp32_const, quant
 
 
+# Mixed-precision experiments for the local graph (EXPERIMENTS=1): which part of the local
+# transformer is sensitive to int8? Node names are those of the FP32 export.
+LOCAL_EXPERIMENTS = {
+    "heads_fp32": r"^/(audio_lm_heads\.\d+|text_lm_head)/MatMul$",
+    "attn_fp32": r"^/c_(attn|proj)(_\d+)?/MatMul$",
+    "layer_fp32": r"^/(c_attn|c_proj|mlp/fc_in|mlp/fc_out)(_\d+)?/MatMul$",
+}
+
+
+def quantize(src, dst, exclude=()):
+    quantize_dynamic(
+        model_input=src,
+        model_output=dst,
+        op_types_to_quantize=["MatMul", "Gemm"],
+        per_channel=True,
+        reduce_range=False,
+        weight_type=QuantType.QInt8,
+        use_external_data_format=False,
+        nodes_to_exclude=list(exclude),
+        extra_options={"MatMulConstBOnly": True},
+    )
+
+
 def prepare_fp32(src, dst, name):
     m = onnx.load(src)
     folded = fold_identity_initializers(m)
@@ -224,16 +247,7 @@ def main(work="work"):
         print(f"preparing {name} ...", flush=True)
         prepare_fp32(src, opt, name)
         print(f"quantizing {name} ...", flush=True)
-        quantize_dynamic(
-            model_input=opt,
-            model_output=dst,
-            op_types_to_quantize=["MatMul", "Gemm"],
-            per_channel=True,
-            reduce_range=False,
-            weight_type=QuantType.QInt8,
-            use_external_data_format=False,
-            extra_options={"MatMulConstBOnly": True},
-        )
+        quantize(opt, dst)
         left, quant = matmul_coverage(dst)
         report[name] = {"fp32_const_matmuls_left": left, "int8_matmuls": quant, "mb": round(os.path.getsize(dst) / 1e6, 1)}
         print(f"  -> {report[name]}", flush=True)
@@ -249,6 +263,18 @@ def main(work="work"):
 
     for name in CODEC_FILES:
         shutil.copy2(os.path.join(src_codec, name), os.path.join(out_codec, name))
+    if os.environ.get("EXPERIMENTS") == "1":
+        import re
+        names = [n.name for n in onnx.load(os.path.join(opt_tts, LOCAL_GRAPH + ".onnx"), load_external_data=False).graph.node
+                 if n.op_type == "MatMul"]
+        for exp, pattern in LOCAL_EXPERIMENTS.items():
+            excl = [n for n in names if re.match(pattern, n)]
+            d = os.path.join(work, "exp", exp)
+            os.makedirs(d, exist_ok=True)
+            dst = os.path.join(d, LOCAL_GRAPH + ".onnx")
+            quantize(os.path.join(opt_tts, LOCAL_GRAPH + ".onnx"), dst, excl)
+            report[f"exp_{exp}"] = {"fp32_matmuls": len(excl), "mb": round(os.path.getsize(dst) / 1e6, 1)}
+            print(f"  experiment {exp}: {report[f'exp_{exp}']}", flush=True)
     json.dump(report, open(os.path.join(work, "quantize_report.json"), "w"), indent=2)
     print("done:", os.path.join(work, "out"), json.dumps(report))
 
