@@ -40,13 +40,27 @@ object TextNormalizer {
         private const val CJK = "[$CJK_CHARS]"
         private const val PROT = "___PROT\\d+___"
         private const val LATINISH = "(?:$PROT|(?=[A-Za-z0-9._/+:-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._/+:-]*)"
-        private const val U = Pattern.UNICODE_CHARACTER_CLASS
+        /**
+         * Unicode-aware \w / \s like Python's `re`. Android's java.util.regex is ICU, where these
+         * classes are already Unicode and UNICODE_CHARACTER_CLASS is unsupported on some versions
+         * ("Unsupported flags: 256"), so fall back to plain compilation there. Real syntax errors
+         * (PatternSyntaxException) are not swallowed.
+         */
+        private fun unicodePattern(regex: String): Pattern = try {
+            Pattern.compile(regex, Pattern.UNICODE_CHARACTER_CLASS)
+        } catch (e: java.util.regex.PatternSyntaxException) {
+            throw e
+        } catch (e: IllegalArgumentException) {
+            Pattern.compile(regex)
+        }
 
-        private val URL = Pattern.compile("https?://[^\\s\\u3000，。！？；、）】》〉」』]+", U)
-        private val EMAIL = Pattern.compile("(?<![\\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}(?![\\w.-])", U)
+        // NOTE: every pattern here must also compile under ICU (Android): escape literal `{ } [ ]`
+        // outside character classes. tools/regex/check_android_regex.sh verifies this in CI.
+        private val URL = unicodePattern("https?://[^\\s\\u3000，。！？；、）】》〉」』]+")
+        private val EMAIL = unicodePattern("(?<![\\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}(?![\\w.-])")
         private val MENTION = Pattern.compile("(?<![A-Za-z0-9_])@[A-Za-z0-9_]{1,32}")
         private val REDDIT = Pattern.compile("(?<![A-Za-z0-9_])(?:u|r)/[A-Za-z0-9_]+")
-        private val HASHTAG = Pattern.compile("(?<![A-Za-z0-9_])#(?!\\s)[^\\s#]+", U)
+        private val HASHTAG = unicodePattern("(?<![A-Za-z0-9_])#(?!\\s)[^\\s#]+")
         private val DOT_TOKEN = Pattern.compile("(?<![A-Za-z0-9_])\\.(?=[A-Za-z0-9._-]*[A-Za-z0-9])[A-Za-z0-9._-]+")
         private val FILELIKE = Pattern.compile(
             "(?<![A-Za-z0-9_])(?=[A-Za-z0-9._/+:-]*[A-Za-z])(?=[A-Za-z0-9._/+:-]*[./+:-])[A-Za-z0-9][A-Za-z0-9._/+:-]*(?![A-Za-z0-9_])"
@@ -112,7 +126,7 @@ object TextNormalizer {
             else -> false
         }
 
-        private val MD_LINK = Regex("\\[([^\\[\\]]+?)]\\((https?://[^)\\s]+)\\)")
+        private val MD_LINK = Regex("\\[([^\\[\\]]+?)\\]\\((https?://[^)\\s]+)\\)")
         private val MD_HEADING = Regex("^#{1,6}\\s+")
         private val MD_QUOTE = Regex("^>\\s+")
         private val MD_BULLET = Regex("^[-*+]\\s+")
@@ -176,8 +190,9 @@ object TextNormalizer {
             return MULTI_SPACE.replace(t, " ").trim()
         }
 
-        private val SQUARE = Regex("\\[\\s*([^\\[\\]]+?)\\s*]")
-        private val CURLY = Regex("\\{\\s*([^{}]+?)\\s*}")
+        private val SQUARE = Regex("\\[\\s*([^\\[\\]]+?)\\s*\\]")
+        // the closing brace must be escaped: ICU (Android) rejects a bare `}` with U_REGEX_RULE_SYNTAX
+        private val CURLY = Regex("\\{\\s*([^{}]+?)\\s*\\}")
         private val CJK_BRACKETS = Regex("[【〖『「]\\s*([^】〗』」]+?)\\s*[】〗』」]")
         private val STANDALONE_TITLE =
             Regex("(^|[。！？!?；;]\\s*)《([^》]+)》(?=\\s*(?:___PROT\\d+___|[—–―-]{2,}|$|[。！？!?；;，,]))")

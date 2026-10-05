@@ -200,5 +200,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Check regexes compile under ICU (Android)
+        # The desktop JDK accepts regex syntax that Android's ICU engine rejects; a bad pattern
+        # crashes the text normalizer on the phone while every JVM test passes.
+        run: |
+          ls /usr/lib/x86_64-linux-gnu/libicui18n.so.* >/dev/null 2>&1 || sudo apt-get install -y libicu74
+          bash tools/regex/check_android_regex.sh
       - name: Run mock engine test
         run: bash tools/mock/run_mock_test.sh
