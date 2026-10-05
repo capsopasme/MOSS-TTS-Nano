@@ -29,6 +29,8 @@ jobs:
           mkdir -p verify
           python tools/verify_onnx.py work/src verify/fp32.wav | tee verify/fp32.json
           python tools/verify_onnx.py work/out verify/int8.wav | tee verify/int8.json
+          echo "::notice title=fp32::$(cat verify/fp32.json)"
+          echo "::notice title=int8::$(cat verify/int8.json)"
           ls -la work/out/*
 
       - uses: actions/upload-artifact@v4

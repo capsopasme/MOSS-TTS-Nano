@@ -216,7 +216,7 @@ private fun ModelCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!ready || (withClone && !cloneReady)) {
                     Button(onClick = { ModelDownloadService.start(context, variant, withClone) }) {
-                        Text(if (ModelStore.downloadedBytes(context, variant) > 0) "继续下载" else "下载（约 ${if (variant == ModelVariant.FP32) "760" else "520"} MB）")
+                        Text(if (ModelStore.downloadedBytes(context, variant) > 0) "继续下载" else "下载（约 ${if (variant == ModelVariant.FP32) "760" else "550"} MB）")
                     }
                 }
                 if (ModelStore.downloadedBytes(context, variant) > 0) {
