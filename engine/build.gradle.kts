@@ -14,6 +14,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release")
+                targets += "mossnano_jni" // don't build sentencepiece's CLI tools
             }
         }
         consumerProguardFiles("consumer-rules.pro")
