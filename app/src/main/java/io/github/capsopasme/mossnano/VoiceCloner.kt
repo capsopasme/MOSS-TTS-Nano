@@ -5,13 +5,17 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import io.github.capsopasme.mossnano.engine.LoudnessMeter
+import io.github.capsopasme.mossnano.engine.OutputGain
 import io.github.capsopasme.mossnano.engine.Resampler
+import io.github.capsopasme.mossnano.engine.VoiceLoudness
 import io.github.capsopasme.mossnano.engine.VoicePrompt
 import java.nio.ByteOrder
 
 /**
  * Turns a user audio clip into a reusable voice: decode (any format MediaCodec supports)
- * -> trim -> resample to 48 kHz -> stereo -> MOSS-Audio-Tokenizer encoder -> prompt codes.
+ * -> trim -> resample to 48 kHz -> loudness-normalize -> stereo -> MOSS-Audio-Tokenizer
+ * encoder -> prompt codes.
  *
  * The clip is capped at 10 s: built-in voices use ~100 frames (8 s); longer prompts make
  * every prefill slower without improving similarity much.
@@ -28,14 +32,16 @@ object VoiceCloner {
         val clip = if (trimmed.size > maxSamples) trimmed.copyOf(maxSamples) else trimmed
         require(clip.size > rate) { "有效音频太短（至少 1 秒，建议 5~10 秒清晰人声）" }
         val at48 = Resampler.resample(clip, rate, TARGET_RATE)
-        normalizePeak(at48)
+        // The model copies the reference's level: bring every clip to the same loudness (peaks
+        // limited) so clones come out about as loud as the louder built-in voices.
+        val refLufs = normalizeLoudness(at48)
         // channel-major stereo [L..., R...]
         val stereo = FloatArray(at48.size * 2)
         System.arraycopy(at48, 0, stereo, 0, at48.size)
         System.arraycopy(at48, 0, stereo, at48.size, at48.size)
         val codes = EngineManager.withEngine { it.encodeReferenceAudio(stereo, at48.size) }
         require(codes.isNotEmpty()) { "编码失败" }
-        return VoiceStore.save(context, name, codes)
+        return VoiceStore.save(context, name, codes, VoiceLoudness.estimateFromReference(refLufs))
     }
 
     private fun decodeToMono(context: Context, uri: Uri): Pair<FloatArray, Int> {
@@ -140,12 +146,18 @@ object VoiceCloner {
         return x.copyOfRange(a, b)
     }
 
-    private fun normalizePeak(x: FloatArray) {
-        var peak = 0f
-        for (v in x) peak = maxOf(peak, kotlin.math.abs(v))
-        if (peak < 1e-4f) return
-        val g = 0.9f / peak
-        for (i in x.indices) x[i] *= g
+    /**
+     * Gain to [VoiceLoudness.REFERENCE_TARGET_LUFS] (measured as the dual-mono stereo clip the
+     * encoder sees) through the output limiter, so a dynamic clip is not clipped on the way up.
+     * @return the clip's loudness afterwards (LUFS), NaN if it is too short / silent to measure.
+     */
+    private fun normalizeLoudness(x: FloatArray): Double {
+        val dualMono = 10 * kotlin.math.log10(2.0)
+        val before = LoudnessMeter.measure(x, x.size, TARGET_RATE, 1) + dualMono
+        if (!before.isFinite()) return Double.NaN
+        val gain = (VoiceLoudness.REFERENCE_TARGET_LUFS - before).coerceIn(-20.0, 24.0)
+        OutputGain(gain.toFloat(), TARGET_RATE, 1).process(x, x.size)
+        return LoudnessMeter.measure(x, x.size, TARGET_RATE, 1) + dualMono
     }
 
     private class FloatArrayBuilder {

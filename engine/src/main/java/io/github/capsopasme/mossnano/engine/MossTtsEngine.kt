@@ -169,9 +169,12 @@ class MossTtsEngine private constructor(
         synthLock.withLock {
             check(!closed) { "engine closed" }
             activeCancel = cancel
-            val stats = SynthStats().apply { sampleRate = cfg.codec.sampleRate }
+            val stats = SynthStats().apply {
+                sampleRate = cfg.codec.sampleRate
+                gainDb = request.gainDb
+            }
             val startNs = System.nanoTime()
-            val job = Job(sink, cancel, stats, startNs)
+            val job = Job(sink, cancel, stats, startNs, OutputGain(request.gainDb, cfg.codec.sampleRate, cfg.codec.channels))
             val runOptions = OrtSession.RunOptions()
             cancel.attach(runOptions)
             try {
@@ -323,7 +326,7 @@ class MossTtsEngine private constructor(
     // Codec worker thread
     // =================================================================================
 
-    private class Job(val sink: AudioSink, val cancel: CancelSignal, val stats: SynthStats, val startNs: Long) {
+    private class Job(val sink: AudioSink, val cancel: CancelSignal, val stats: SynthStats, val startNs: Long, val gain: OutputGain) {
         val done = CountDownLatch(1)
         @Volatile var error: Throwable? = null
     }
@@ -384,6 +387,12 @@ class MossTtsEngine private constructor(
             }
             emittedFrames += frames
             j.stats.audioFrames += frames
+            if (buf === silence) {
+                j.gain.skip(frames)
+            } else {
+                j.gain.process(buf, frames) // in place: the codec output buffer is rewritten by the next call
+                j.stats.limitedFrames = j.gain.limitedFrames
+            }
             if (!j.sink.onAudio(buf, frames)) j.cancel.cancel()
         }
 

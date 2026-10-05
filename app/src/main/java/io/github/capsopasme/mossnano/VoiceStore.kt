@@ -19,17 +19,20 @@ object VoiceStore {
                     val r = rows.getJSONArray(i)
                     IntArray(r.length()) { r.getInt(it) }
                 }
-                VoicePrompt(o.getString("id"), o.getString("name"), "克隆", codes, builtin = false)
+                // clones made before v0.3.0 have no loudness estimate -> no automatic compensation
+                VoicePrompt(o.getString("id"), o.getString("name"), "克隆", codes, builtin = false, loudnessLufs = o.optDouble("lufs", Double.NaN))
             }.getOrNull()
         }
 
-    fun save(context: Context, name: String, codes: Array<IntArray>): VoicePrompt {
+    /** @param lufs expected loudness of speech in this voice (see [VoicePrompt.loudnessLufs]), NaN if unknown. */
+    fun save(context: Context, name: String, codes: Array<IntArray>, lufs: Double): VoicePrompt {
         val id = "clone_" + System.currentTimeMillis()
         val rows = JSONArray()
         for (r in codes) rows.put(JSONArray().apply { r.forEach { put(it) } })
         val o = JSONObject().put("id", id).put("name", name).put("codes", rows)
+        if (lufs.isFinite()) o.put("lufs", lufs)
         File(dir(context), "$id.json").writeText(o.toString())
-        return VoicePrompt(id, name, "克隆", codes, builtin = false)
+        return VoicePrompt(id, name, "克隆", codes, builtin = false, loudnessLufs = lufs)
     }
 
     fun delete(context: Context, id: String) {

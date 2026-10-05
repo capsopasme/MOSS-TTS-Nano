@@ -57,6 +57,12 @@ class SynthRequest(
     val seed: Long? = 1234L,
     val normalizeText: Boolean = true,
     val maxFramesPerChunk: Int = 375,
+    /**
+     * Output gain in dB (loudness compensation of quiet voices + the user's volume). The output
+     * always runs through a zero-latency peak limiter ([OutputGain]), so neither the gain nor the
+     * codec's own overshoots clip.
+     */
+    val gainDb: Float = 0f,
 )
 
 /** Thread-safe cancellation; also aborts an ORT run that is in flight. */
@@ -92,6 +98,9 @@ class SynthStats {
     @Volatile var codecCalls = 0
     @Volatile var codecMs = 0L
     @Volatile var audioFrames = 0L
+    /** Audio frames where the output limiter reduced the gain. */
+    @Volatile var limitedFrames = 0L
+    var gainDb = 0f
     var wallMs = 0L
     var sampleRate = 48000
 
@@ -106,6 +115,9 @@ class SynthStats {
         append(" · ${frames}帧 · ${chunks}段\n")
         append("codec ${codecCalls}次 ${codecMs}ms")
         if (frames > 0) append(" (${"%.1f".format(codecMs.toDouble() / frames)}ms/帧, 与LM并行)")
+        if (gainDb != 0f || limitedFrames > 0) {
+            append("\n增益 ${"%+.1f".format(gainDb)}dB · 限幅 ${"%.1f".format(limitedFrames * 100.0 / maxOf(1L, audioFrames))}%")
+        }
     }
 }
 

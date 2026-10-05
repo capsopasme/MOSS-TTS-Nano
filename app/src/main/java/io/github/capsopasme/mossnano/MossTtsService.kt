@@ -12,6 +12,7 @@ import io.github.capsopasme.mossnano.engine.AudioSink
 import io.github.capsopasme.mossnano.engine.CancelSignal
 import io.github.capsopasme.mossnano.engine.SynthRequest
 import io.github.capsopasme.mossnano.engine.TimeStretch
+import io.github.capsopasme.mossnano.engine.VoicePrompt
 import java.util.Locale
 
 /**
@@ -22,6 +23,8 @@ import java.util.Locale
 class MossTtsService : TextToSpeechService() {
     companion object {
         private const val TAG = "MossTtsService"
+        /** "auto-zh" / "auto-en" / "auto-ja": follow the voice picked in the app (see [onGetVoices]). */
+        const val AUTO_PREFIX = "auto-"
         /** Languages listed by the upstream README. */
         private val LANGS = setOf(
             "zho", "eng", "deu", "spa", "fra", "jpn", "ita", "hun", "kor", "rus",
@@ -50,39 +53,50 @@ class MossTtsService : TextToSpeechService() {
         cancel?.cancel()
     }
 
-    private fun localeOf(group: String): Locale = when {
-        group.contains("English", ignoreCase = true) -> Locale.US
-        group.contains("Japanese", ignoreCase = true) -> Locale.JAPAN
-        else -> Locale.SIMPLIFIED_CHINESE // Chinese built-ins and cloned voices
+    /**
+     * Besides the real voices, one "auto" voice per language is listed and returned as the default
+     * voice. Apps that don't pick a voice themselves (most do not) store the default voice name when
+     * they connect and send it with every request; with an auto name the engine resolves the voice
+     * per request ([Voices.forLanguage]), so changing the voice in the app applies at once, also to
+     * apps that stay connected for a long time. Picking a real voice in an app still pins it.
+     */
+    private fun autoName(lang: String) = AUTO_PREFIX + lang
+
+    private fun autoLang(name: String?): String? =
+        name?.takeIf { it.startsWith(AUTO_PREFIX) }?.removePrefix(AUTO_PREFIX)?.takeIf { it in VoiceLang.ALL }
+
+    override fun onGetVoices(): List<Voice> {
+        val real = EngineManager.voices(this)
+        if (real.isEmpty()) return emptyList()
+        val auto = VoiceLang.ALL.map { l ->
+            Voice(autoName(l), VoiceLang.locale(l), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
+        }
+        return auto + real.map { v ->
+            Voice(v.id, VoiceLang.locale(VoiceLang.of(v)), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
+        }
     }
 
-    override fun onGetVoices(): List<Voice> =
-        EngineManager.voices(this).map { v ->
-            Voice(v.id, localeOf(v.group), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
-        }
-
-    override fun onIsValidVoiceName(voiceName: String?): Int =
-        if (EngineManager.voices(this).any { it.id == voiceName }) TextToSpeech.SUCCESS else TextToSpeech.ERROR
+    override fun onIsValidVoiceName(voiceName: String?): Int = when {
+        autoLang(voiceName) != null -> if (EngineManager.voices(this).isNotEmpty()) TextToSpeech.SUCCESS else TextToSpeech.ERROR
+        EngineManager.voices(this).any { it.id == voiceName } -> TextToSpeech.SUCCESS
+        else -> TextToSpeech.ERROR
+    }
 
     override fun onLoadVoice(voiceName: String?): Int = onIsValidVoiceName(voiceName)
 
     override fun onGetDefaultVoiceNameFor(lang: String?, country: String?, variant: String?): String? {
-        val voices = EngineManager.voices(this)
-        val l = iso3(lang)
-        val saved = AppSettings(this).voiceId
-        val savedVoice = voices.firstOrNull { it.id == saved }
-        // Built-in voices exist for zh / en / ja; other languages just use the voice picked in the app.
-        val wanted = when (l) {
-            "eng" -> "English"
-            "jpn" -> "Japanese"
-            null, "zho" -> "Chinese"
-            else -> null
-        }
-        // The voice picked in the app wins whenever it speaks the requested language.
-        if (savedVoice != null && (wanted == null || localeOf(savedVoice.group).isO3Language == (l ?: "zho"))) return savedVoice.id
-        return wanted?.let { w -> voices.firstOrNull { it.group.contains(w, true) }?.id }
-            ?: savedVoice?.id
-            ?: voices.firstOrNull()?.id
+        if (EngineManager.voices(this).isEmpty()) return null
+        return autoName(VoiceLang.fromIso3(iso3(lang)))
+    }
+
+    /** A real voice the client picked, else the current default voice for the request's language. */
+    private fun voiceFor(request: SynthesisRequest): VoicePrompt? {
+        val all = EngineManager.voices(this)
+        val name = request.voiceName
+        if (!name.isNullOrEmpty() && autoLang(name) == null) all.firstOrNull { it.id == name }?.let { return it }
+        // auto voice, no voice name, or a voice that no longer exists (deleted clone)
+        val lang = autoLang(name) ?: VoiceLang.fromIso3(iso3(request.language))
+        return Voices.forLanguage(this, lang, all)
     }
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
@@ -94,7 +108,7 @@ class MossTtsService : TextToSpeechService() {
             return
         }
         val settings = AppSettings(this)
-        val voice = EngineManager.resolveVoice(this, request.voiceName ?: settings.voiceId)
+        val voice = voiceFor(request)
         if (voice == null || !ModelStore.isReady(this, settings.variant)) {
             callback.error(TextToSpeech.ERROR_NOT_INSTALLED_YET)
             return
@@ -106,7 +120,12 @@ class MossTtsService : TextToSpeechService() {
             val stats = EngineManager.withEngine { engine ->
                 if (c.isCancelled) return@withEngine null
                 engine.synthesize(
-                    SynthRequest(text, voice, seed = if (settings.fixedSeed) 1234L else null, normalizeText = settings.normalize),
+                    SynthRequest(
+                        text, voice,
+                        seed = if (settings.fixedSeed) 1234L else null,
+                        normalizeText = settings.normalize,
+                        gainDb = Voices.gainDb(this, voice),
+                    ),
                     CallbackSink(callback, c, speed),
                     c,
                 )

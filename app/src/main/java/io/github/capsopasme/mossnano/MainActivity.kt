@@ -15,6 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -27,17 +28,20 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -50,6 +54,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +73,7 @@ import io.github.capsopasme.mossnano.engine.VoicePrompt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -248,19 +254,21 @@ private fun SpeakCard(settings: AppSettings, refresh: Int) {
     val ui by SpeakService.state.collectAsStateWithLifecycle()
     var text by remember { mutableStateOf(settings.lastText) }
     var voices by remember { mutableStateOf(emptyList<VoicePrompt>()) }
-    var voiceId by remember { mutableStateOf(settings.voiceId) }
+    // re-read on refresh: a new clone selects itself
+    var voiceId by remember(refresh) { mutableStateOf(settings.voiceId) }
     var speed by remember { mutableStateOf(settings.speed) }
     LaunchedEffect(refresh, settings.variant) {
         voices = withContext(Dispatchers.IO) { EngineManager.voices(context) }
     }
+    val selected = voices.firstOrNull { it.id == voiceId } ?: voices.firstOrNull()
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) { uri: Uri? ->
-        if (uri != null) SpeakService.saveWav(context, text, voiceId, uri)
+        if (uri != null) SpeakService.saveWav(context, text, selected?.id, uri)
     }
 
     SectionCard("朗读（流式）") {
-        VoicePicker(voices, voiceId) {
-            voiceId = it
-            settings.voiceId = it
+        VoicePicker(voices, selected) {
+            voiceId = it.id
+            settings.selectVoice(it)
         }
         OutlinedTextField(
             value = text,
@@ -280,14 +288,15 @@ private fun SpeakCard(settings: AppSettings, refresh: Int) {
                 modifier = Modifier.weight(1f),
             )
         }
+        if (selected != null) VolumeRow(settings, selected)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                enabled = text.isNotBlank() && voices.isNotEmpty(),
-                onClick = { SpeakService.speak(context, text, voiceId) },
+                enabled = text.isNotBlank() && selected != null,
+                onClick = { SpeakService.speak(context, text, selected?.id) },
             ) { Text("朗读") }
             OutlinedButton(enabled = ui.busy, onClick = { SpeakService.stop(context) }) { Text("停止") }
             TextButton(
-                enabled = text.isNotBlank() && voices.isNotEmpty() && !ui.busy,
+                enabled = text.isNotBlank() && selected != null && !ui.busy,
                 onClick = { exportLauncher.launch("moss_tts_${System.currentTimeMillis()}.wav") },
             ) { Text("导出 WAV") }
         }
@@ -299,27 +308,116 @@ private fun SpeakCard(settings: AppSettings, refresh: Int) {
     }
 }
 
+/** Per-voice volume on top of the automatic loudness compensation; applies to the system TTS too. */
 @Composable
-private fun VoicePicker(voices: List<VoicePrompt>, selectedId: String?, onSelect: (String) -> Unit) {
+private fun VolumeRow(settings: AppSettings, voice: VoicePrompt) {
+    var offset by remember(voice.id) { mutableFloatStateOf(settings.volumeOffsetDb(voice.id)) }
+    val auto = remember(voice.id) { Voices.autoGainDb(voice) }
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("音量 ${"%+d".format(offset.roundToInt())} dB", Modifier.width(96.dp), style = MaterialTheme.typography.bodySmall)
+            Slider(
+                value = offset,
+                onValueChange = { offset = it.roundToInt().toFloat() },
+                onValueChangeFinished = { settings.setVolumeOffsetDb(voice.id, offset) },
+                valueRange = AppSettings.VOLUME_MIN_DB..AppSettings.VOLUME_MAX_DB,
+                steps = (AppSettings.VOLUME_MAX_DB - AppSettings.VOLUME_MIN_DB).toInt() - 1,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            buildString {
+                if (auto >= 0.5f) append("这个音色的参考录音偏小声，已自动提高 ${"%.1f".format(auto)} dB；")
+                append("滑块只调「${voice.displayName}」，系统 TTS 同样生效，带限幅不会爆音。")
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun VoicePicker(voices: List<VoicePrompt>, selected: VoicePrompt?, onSelect: (VoicePrompt) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    val selected = voices.firstOrNull { it.id == selectedId } ?: voices.firstOrNull()
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("音色", Modifier.width(48.dp))
         OutlinedButton(onClick = { open = true }, enabled = voices.isNotEmpty()) {
-            Text(selected?.let { "${it.displayName} · ${it.group}" } ?: "（模型未就绪）")
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            voices.forEach { v ->
-                DropdownMenuItem(
-                    text = { Text("${v.displayName}  ·  ${v.group}") },
-                    onClick = {
-                        onSelect(v.id)
-                        open = false
-                    },
-                )
-            }
+            Text(selected?.let { "${it.displayName} · ${voiceSubtitle(it)}" } ?: "（模型未就绪）")
         }
     }
+    if (open) {
+        VoiceDialog(voices, selected?.id, onDismiss = { open = false }) {
+            onSelect(it)
+            open = false
+        }
+    }
+}
+
+private fun voiceSubtitle(v: VoicePrompt): String = when {
+    !v.builtin -> "克隆 · ${"%.1f".format(v.frames * 0.08)} 秒"
+    else -> VoiceLang.label(VoiceLang.of(v)) + when {
+        v.group.contains("Female", ignoreCase = true) -> "女声"
+        v.group.contains("Male", ignoreCase = true) -> "男声"
+        else -> ""
+    }
+}
+
+/**
+ * Voice list as a dialog. (A DropdownMenu with 19+ entries is taller than the screen; with the
+ * edge-to-edge layout Android 15+ enforces, its last entries ended up behind the navigation bar.)
+ * Dialog windows stay inside the system bars, the list scrolls, and it opens at the current voice.
+ */
+@Composable
+private fun VoiceDialog(voices: List<VoicePrompt>, selectedId: String?, onDismiss: () -> Unit, onPick: (VoicePrompt) -> Unit) {
+    val rows: List<Any> = remember(voices) {
+        val sections = listOf(
+            "我的克隆音色" to voices.filter { !it.builtin },
+            "中文" to voices.filter { it.builtin && VoiceLang.of(it) == VoiceLang.ZH },
+            "英文" to voices.filter { it.builtin && VoiceLang.of(it) == VoiceLang.EN },
+            "日文" to voices.filter { it.builtin && VoiceLang.of(it) == VoiceLang.JA },
+        )
+        sections.filter { it.second.isNotEmpty() }.flatMap { (title, list) -> listOf<Any>(title) + list }
+    }
+    val initial = remember(rows, selectedId) { rows.indexOfFirst { it is VoicePrompt && it.id == selectedId } }
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = maxOf(0, initial - 2))
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        title = { Text("选择音色") },
+        text = {
+            LazyColumn(state = listState, modifier = Modifier.heightIn(max = 520.dp)) {
+                items(rows, key = { if (it is VoicePrompt) "v:" + it.id else "h:$it" }) { row ->
+                    if (row is VoicePrompt) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(row) }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = row.id == selectedId, onClick = { onPick(row) })
+                            Column(Modifier.weight(1f)) {
+                                Text(row.displayName, style = MaterialTheme.typography.bodyLarge)
+                                val auto = Voices.autoGainDb(row)
+                                Text(
+                                    voiceSubtitle(row) + if (auto >= 0.5f) " · 音量已补偿 +${"%.0f".format(auto)} dB" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            row as String,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                        )
+                    }
+                }
+            }
+        },
+    )
 }
 
 // --------------------------------------------------------------------------------- clone
@@ -340,7 +438,8 @@ private fun CloneCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
         scope.launch {
             msg = withContext(Dispatchers.Default) {
                 runCatching { VoiceCloner.clone(context, uri, name.ifBlank { "我的音色" }) }
-                    .fold({ "已添加音色「${it.displayName}」（${it.frames} 帧）" }, { "失败：${it.message}" })
+                    .onSuccess { settings.selectVoice(it) }
+                    .fold({ "已添加并选中音色「${it.displayName}」（${"%.1f".format(it.frames * 0.08)} 秒）" }, { "失败：${it.message}" })
             }
             busy = false
             onChanged()
@@ -359,7 +458,7 @@ private fun CloneCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
         msg?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         cloned.forEach { v ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${v.displayName}（${v.frames} 帧）", Modifier.weight(1f))
+                Text("${v.displayName}（${"%.1f".format(v.frames * 0.08)} 秒）", Modifier.weight(1f))
                 TextButton(onClick = {
                     VoiceStore.delete(context, v.id)
                     onChanged()

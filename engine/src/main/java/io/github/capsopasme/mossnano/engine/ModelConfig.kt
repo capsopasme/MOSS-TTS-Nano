@@ -10,6 +10,12 @@ class VoicePrompt(
     /** [frames][n_vq] codec tokens. */
     val codes: Array<IntArray>,
     val builtin: Boolean,
+    /**
+     * Typical integrated loudness (LUFS) of speech generated with this voice, NaN if unknown.
+     * The model reproduces the level of the reference clip, so a quiet clip gives quiet speech;
+     * [VoiceLoudness.autoGainDb] turns this into a compensation gain.
+     */
+    val loudnessLufs: Double = Double.NaN,
 ) {
     val frames: Int get() = codes.size
     override fun toString(): String = "$displayName ($id, ${codes.size} frames)"
@@ -127,6 +133,7 @@ internal class ModelConfig(
                     group = (v["group"] as? String).orEmpty(),
                     codes = codes,
                     builtin = true,
+                    loudnessLufs = VoiceLoudness.builtinLufs(id, codes),
                 )
             }
 

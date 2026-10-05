@@ -135,6 +135,7 @@ class SpeakService : Service() {
                 voice = voice,
                 seed = if (settings.fixedSeed) 1234L else null,
                 normalizeText = settings.normalize,
+                gainDb = Voices.gainDb(this, voice),
             )
             val stats = if (saveTo == null) {
                 requestFocus(cancel)

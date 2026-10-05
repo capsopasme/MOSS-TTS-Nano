@@ -2,6 +2,7 @@ package io.github.capsopasme.mossnano
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.capsopasme.mossnano.engine.VoicePrompt
 
 enum class ModelVariant(val dirName: String, val label: String) {
     FP32("fp32", "FP32（官方原版）"),
@@ -47,9 +48,25 @@ class AppSettings(context: Context) {
         get() = prefs.getBoolean("spinning", true)
         set(v) = prefs.edit().putBoolean("spinning", v).apply()
 
+    /** The voice last picked in the app (any language). */
     var voiceId: String?
         get() = prefs.getString("voiceId", null)
         set(v) = prefs.edit().putString("voiceId", v).apply()
+
+    /** The voice last picked in the app among voices of [lang] ([VoiceLang] key). */
+    fun lastVoiceFor(lang: String): String? = prefs.getString("voice_$lang", null)
+
+    /** Picking a voice in the app: it becomes the app voice and the system TTS voice for its language. */
+    fun selectVoice(voice: VoicePrompt) {
+        prefs.edit().putString("voiceId", voice.id).putString("voice_${VoiceLang.of(voice)}", voice.id).apply()
+    }
+
+    /** User volume adjustment of one voice in dB, on top of the automatic loudness compensation. */
+    fun volumeOffsetDb(voiceId: String): Float = prefs.getFloat("vol_$voiceId", 0f)
+
+    fun setVolumeOffsetDb(voiceId: String, db: Float) {
+        prefs.edit().putFloat("vol_$voiceId", db.coerceIn(VOLUME_MIN_DB, VOLUME_MAX_DB)).apply()
+    }
 
     var fixedSeed: Boolean
         get() = prefs.getBoolean("fixedSeed", true)
@@ -78,6 +95,8 @@ class AppSettings(context: Context) {
         set(v) = prefs.edit().putString("lastText", v).apply()
 
     companion object {
+        const val VOLUME_MIN_DB = -6f
+        const val VOLUME_MAX_DB = 12f
         const val DEFAULT_TEXT =
             "你好，我是运行在你手机上的 MOSS-TTS-Nano。我只有一亿参数，完全离线，边生成边播放，首个音频通常在一秒内就能听到。"
     }
