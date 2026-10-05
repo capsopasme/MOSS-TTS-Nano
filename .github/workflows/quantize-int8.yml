@@ -1,49 +1,167 @@
 name: Build INT8 model pack
 
-# Manual: quantizes the official ONNX export to INT8 and publishes the files as assets of the
-# "models-int8" release, which the app downloads for its INT8 variant.
+# Quantizes the official ONNX export to INT8 (tools/quantize_int8.py), checks it against FP32
+# (tools/check_int8_pack.py), benchmarks FP32 / old INT8 / new INT8 on an ARM64 runner (closest
+# thing to the phone CI has: Armv9 with dot-product + i8mm) and publishes the files as assets of
+# the release the app downloads its INT8 variant from (ModelStore.INT8_PACK_TAG).
+#
+# Publishing happens on manual runs, or on pushes whose head commit message contains
+# "[publish-int8]".
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - tools/quantize_int8.py
+      - tools/check_int8_pack.py
+      - tools/bench_onnx.py
+      - .github/workflows/quantize-int8.yml
 
 permissions:
   contents: write
 
-jobs:
-  quantize:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+env:
+  PACK_TAG: models-int8-v2
+  ORT_PY: "onnxruntime==1.22.0"
 
-      - uses: actions/setup-python@v5
+jobs:
+  pack:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Install tools
-        run: pip install "onnxruntime==1.22.0" "onnx==1.17.0" "huggingface_hub>=0.24" sentencepiece numpy
+        run: pip install "$ORT_PY" "onnx==1.17.0" "huggingface_hub>=0.24" sentencepiece numpy
+
+      - name: Download official ONNX
+        run: |
+          python - <<'PY'
+          from huggingface_hub import HfApi, snapshot_download
+          api = HfApi()
+          revs = {}
+          for repo, d, pats in [
+              ("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", "work/src/MOSS-TTS-Nano-100M-ONNX", ["*.onnx", "*.data", "*.json", "tokenizer.model"]),
+              ("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", "work/src/MOSS-Audio-Tokenizer-Nano-ONNX", ["*.onnx", "*.data", "*.json"]),
+          ]:
+              sha = api.model_info(repo).sha
+              revs[repo] = sha
+              snapshot_download(repo, revision=sha, local_dir=d, allow_patterns=pats)
+          print("::notice title=hf revisions::" + " ".join(f"{k}@{v}" for k, v in revs.items()))
+          PY
+          echo "::notice title=fp32 sizes::$(cd work/src && find . -type f ! -path '*/.cache/*' -printf '%p=%s ' | sort)"
 
       - name: Quantize
-        run: python tools/quantize_int8.py work
+        run: |
+          python tools/quantize_int8.py work
+          echo "::notice title=quantize::$(cat work/quantize_report.json | tr -d '\n ')"
 
-      - name: Verify FP32 vs INT8 (speed + listenable WAVs)
+      - name: Check against FP32 (lossless surgery + quantization error)
+        run: |
+          python tools/check_int8_pack.py work 150 | tee check.json
+          echo "::notice title=check::$(cat check.json)"
+
+      - name: Listenable WAVs (FP32 vs INT8)
         run: |
           mkdir -p verify
           python tools/verify_onnx.py work/src verify/fp32.wav | tee verify/fp32.json
           python tools/verify_onnx.py work/out verify/int8.wav | tee verify/int8.json
-          echo "::notice title=fp32::$(cat verify/fp32.json)"
-          echo "::notice title=int8::$(cat verify/int8.json)"
-          ls -la work/out/*
+          echo "::notice title=verify fp32 (x86)::$(cat verify/fp32.json)"
+          echo "::notice title=verify int8 (x86)::$(cat verify/int8.json)"
 
-      - uses: actions/upload-artifact@v4
+      - name: Pack sizes
+        run: echo "::notice title=int8 sizes::$(cd work/out && find . -type f -printf '%f=%s ' | sort)"
+
+      - uses: actions/upload-artifact@v5
         with:
           name: int8-verification
           path: verify/
 
+      - uses: actions/upload-artifact@v5
+        with:
+          name: int8-pack
+          path: work/out/
+          retention-days: 3
+
       - name: Publish release assets
+        if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[publish-int8]')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view models-int8 >/dev/null 2>&1 || \
-            gh release create models-int8 --title "INT8 model pack" \
-              --notes "Dynamic INT8 quantization of OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX (LM graphs) + unchanged MOSS-Audio-Tokenizer-Nano-ONNX. Built by quantize-int8.yml; downloaded by the app."
+          gh release view "$PACK_TAG" >/dev/null 2>&1 || \
+            gh release create "$PACK_TAG" --title "INT8 model pack (v2)" --latest=false \
+              --notes "Dynamic INT8 quantization of OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX (all LM MatMul weights incl. the 17 unrolled local-transformer steps; local text head sliced to the 2 logits it uses) + unchanged MOSS-Audio-Tokenizer-Nano-ONNX. Built by quantize-int8.yml; downloaded by the app."
           files=$(find work/out -type f ! -name "moss_audio_tokenizer_decode_full.onnx")
-          gh release upload models-int8 $files --clobber
+          gh release upload "$PACK_TAG" $files --clobber
+
+  bench-arm:
+    needs: pack
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install tools
+        run: |
+          pip install "$ORT_PY" "huggingface_hub>=0.24" numpy
+          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build cmake >/dev/null
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: int8-pack
+          path: models/int8new
+
+      - name: Download FP32 + previous INT8 pack
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          snapshot_download("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", local_dir="models/fp32/MOSS-TTS-Nano-100M-ONNX",
+                            allow_patterns=["*.json", "tokenizer.model", "moss_tts_prefill.onnx", "moss_tts_decode_step.onnx",
+                                            "moss_tts_local_fixed_sampled_frame.onnx", "*shared.data"])
+          snapshot_download("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", local_dir="models/fp32/MOSS-Audio-Tokenizer-Nano-ONNX",
+                            allow_patterns=["*.json", "moss_audio_tokenizer_decode_step.onnx", "moss_audio_tokenizer_decode_shared.data"])
+          PY
+          mkdir -p models/int8old/MOSS-TTS-Nano-100M-ONNX
+          cp -r models/int8new/MOSS-Audio-Tokenizer-Nano-ONNX models/int8old/
+          cd models/int8old/MOSS-TTS-Nano-100M-ONNX
+          for f in browser_poc_manifest.json tts_browser_onnx_meta.json tokenizer.model moss_tts_prefill.onnx moss_tts_decode_step.onnx moss_tts_local_fixed_sampled_frame.onnx; do
+            gh release download models-int8 -R "$GITHUB_REPOSITORY" -p "$f" --clobber || echo "no old $f"
+          done
+
+      - name: Graph benchmark (ARM64)
+        run: |
+          echo "cpu: $(nproc) x $(lscpu | grep -m1 'Model name' | sed 's/.*: *//') flags: $(grep -m1 Features /proc/cpuinfo | grep -oE 'asimddp|i8mm|sve2|bf16' | tr '\n' ' ')"
+          for pack in fp32 int8old int8new; do
+            [ -f "models/$pack/MOSS-TTS-Nano-100M-ONNX/moss_tts_local_fixed_sampled_frame.onnx" ] || continue
+            for t in 1 2 4; do
+              r=$(python tools/bench_onnx.py "models/$pack" $t 80)
+              echo "$r"
+              echo "::notice title=arm64 $pack t=$t::$r"
+            done
+          done
+
+      - name: Engine end to end on ARM64 (Kotlin engine, real graphs)
+        run: |
+          for pack in int8new fp32; do
+            out=$(LM_THREADS=4 bash tools/mock/run_real_model.sh "models/$pack" "engine_$pack.wav" 2>&1 | grep -E "首音|prefill|codec|audio:|REAL MODEL" | tr '\n' ' ')
+            echo "$out"
+            echo "::notice title=engine arm64 $pack (4 LM threads)::$out"
+          done
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: engine-arm64-wavs
+          path: engine_*.wav
