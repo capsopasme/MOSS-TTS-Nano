@@ -1,0 +1,2 @@
+-keep class ai.onnxruntime.** { *; }
+-keep class io.github.capsopasme.mossnano.engine.SpmTokenizer { native <methods>; *; }

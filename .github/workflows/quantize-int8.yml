@@ -1,0 +1,47 @@
+name: Build INT8 model pack
+
+# Manual: quantizes the official ONNX export to INT8 and publishes the files as assets of the
+# "models-int8" release, which the app downloads for its INT8 variant.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  quantize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: pip install "onnxruntime==1.22.0" "onnx==1.17.0" "huggingface_hub>=0.24" sentencepiece numpy
+
+      - name: Quantize
+        run: python tools/quantize_int8.py work
+
+      - name: Verify FP32 vs INT8 (speed + listenable WAVs)
+        run: |
+          mkdir -p verify
+          python tools/verify_onnx.py work/src verify/fp32.wav | tee verify/fp32.json
+          python tools/verify_onnx.py work/out verify/int8.wav | tee verify/int8.json
+          ls -la work/out/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: int8-verification
+          path: verify/
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view models-int8 >/dev/null 2>&1 || \
+            gh release create models-int8 --title "INT8 model pack" \
+              --notes "Dynamic INT8 quantization of OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX (LM graphs) + unchanged MOSS-Audio-Tokenizer-Nano-ONNX. Built by quantize-int8.yml; downloaded by the app."
+          files=$(find work/out -type f ! -name "moss_audio_tokenizer_decode_full.onnx")
+          gh release upload models-int8 $files --clobber
