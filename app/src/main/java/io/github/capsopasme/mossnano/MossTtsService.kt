@@ -71,14 +71,16 @@ class MossTtsService : TextToSpeechService() {
         val l = iso3(lang)
         val saved = AppSettings(this).voiceId
         val savedVoice = voices.firstOrNull { it.id == saved }
-        // The voice picked in the app wins whenever it speaks the requested language.
-        if (savedVoice != null && localeOf(savedVoice.group).isO3Language == (l ?: "zho")) return savedVoice.id
+        // Built-in voices exist for zh / en / ja; other languages just use the voice picked in the app.
         val wanted = when (l) {
             "eng" -> "English"
             "jpn" -> "Japanese"
-            else -> "Chinese"
+            null, "zho" -> "Chinese"
+            else -> null
         }
-        return voices.firstOrNull { it.group.contains(wanted, true) }?.id
+        // The voice picked in the app wins whenever it speaks the requested language.
+        if (savedVoice != null && (wanted == null || localeOf(savedVoice.group).isO3Language == (l ?: "zho"))) return savedVoice.id
+        return wanted?.let { w -> voices.firstOrNull { it.group.contains(w, true) }?.id }
             ?: savedVoice?.id
             ?: voices.firstOrNull()?.id
     }
