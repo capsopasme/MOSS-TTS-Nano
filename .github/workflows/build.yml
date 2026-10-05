@@ -26,48 +26,79 @@ jobs:
       - name: Resolve signing key
         # Accepts the usual secret names (SIGNING_KEYSTORE_BASE64 / KEYSTORE_BASE64 / SIGNING_KEY …),
         # so the workflow works with whatever naming the secrets were created with. Only secret
-        # *names* are ever printed; values are masked.
+        # *names* are ever printed; values stay masked.
         if: github.event_name != 'pull_request'
         env:
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          S_SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          S_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          S_ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          S_RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          S_KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          S_SIGNING_KEYSTORE: ${{ secrets.SIGNING_KEYSTORE }}
+          S_KEY_STORE_BASE64: ${{ secrets.KEY_STORE_BASE64 }}
+          S_RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+          S_ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          S_KEYSTORE: ${{ secrets.KEYSTORE }}
+          S_KEY_STORE: ${{ secrets.KEY_STORE }}
+          S_KEYSTORE_FILE: ${{ secrets.KEYSTORE_FILE }}
+          S_SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+          S_SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          S_SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          S_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          S_KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          S_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          S_RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          S_SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          S_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          S_SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+          S_SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          S_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          S_ALIAS: ${{ secrets.ALIAS }}
+          S_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          S_KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          S_SIGNING_ALIAS: ${{ secrets.SIGNING_ALIAS }}
+          S_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          S_SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          S_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          S_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          S_KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+          S_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           pick() {
             for k in "$@"; do
-              v=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$k" 'to_entries[] | select((.key | ascii_upcase) == $k) | .value' | head -c 1000000)
-              if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+              local var="S_$k"
+              if [ -n "${!var:-}" ]; then printf '%s' "${!var}"; return 0; fi
             done
             return 0
           }
-          NAMES=$(printf '%s' "$ALL_SECRETS" | jq -r 'keys | map(select(. != "github_token")) | join(", ")')
-          KS=$(pick SIGNING_KEYSTORE_BASE64 KEYSTORE_BASE64 ANDROID_KEYSTORE_BASE64 RELEASE_KEYSTORE_BASE64 KEYSTORE_B64 \
-                    SIGNING_KEYSTORE KEY_STORE_BASE64 RELEASE_KEYSTORE ANDROID_KEYSTORE APP_KEYSTORE_BASE64 KEYSTORE KEY_STORE \
-                    SIGNING_KEY_BASE64 SIGNING_KEY)
-          if [ -z "$KS" ]; then
-            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-              echo "::error title=signing::no keystore secret found (visible secret names: ${NAMES:-none}); refusing to publish a debug-signed APK"
-              exit 1
-            fi
-            echo "::notice title=signing::no keystore secret found (visible secret names: ${NAMES:-none}); APK is signed with the debug key"
-            exit 0
-          fi
-          SP=$(pick SIGNING_STORE_PASSWORD KEYSTORE_PASSWORD KEY_STORE_PASSWORD STORE_PASSWORD RELEASE_STORE_PASSWORD \
-                    SIGNING_KEYSTORE_PASSWORD ANDROID_KEYSTORE_PASSWORD SIGNING_PASSWORD)
+          KS=$(pick SIGNING_KEYSTORE_BASE64 KEYSTORE_BASE64 ANDROID_KEYSTORE_BASE64 RELEASE_KEYSTORE_BASE64 KEYSTORE_B64 SIGNING_KEYSTORE KEY_STORE_BASE64 RELEASE_KEYSTORE ANDROID_KEYSTORE KEYSTORE KEY_STORE KEYSTORE_FILE SIGNING_KEY_BASE64 SIGNING_KEY)
+          SP=$(pick SIGNING_STORE_PASSWORD KEYSTORE_PASSWORD KEY_STORE_PASSWORD STORE_PASSWORD RELEASE_STORE_PASSWORD SIGNING_KEYSTORE_PASSWORD ANDROID_KEYSTORE_PASSWORD SIGNING_PASSWORD)
           AL=$(pick SIGNING_KEY_ALIAS KEY_ALIAS ALIAS RELEASE_KEY_ALIAS KEYSTORE_ALIAS SIGNING_ALIAS ANDROID_KEY_ALIAS)
           KP=$(pick SIGNING_KEY_PASSWORD KEY_PASSWORD RELEASE_KEY_PASSWORD KEYSTORE_KEY_PASSWORD ANDROID_KEY_PASSWORD)
+          # (command substitution runs in a subshell: recompute the list of names that are set)
+          SET=""; for k in SIGNING_KEYSTORE_BASE64 KEYSTORE_BASE64 ANDROID_KEYSTORE_BASE64 RELEASE_KEYSTORE_BASE64 KEYSTORE_B64 SIGNING_KEYSTORE KEY_STORE_BASE64 RELEASE_KEYSTORE ANDROID_KEYSTORE KEYSTORE KEY_STORE KEYSTORE_FILE SIGNING_KEY_BASE64 SIGNING_KEY SIGNING_STORE_PASSWORD KEYSTORE_PASSWORD KEY_STORE_PASSWORD STORE_PASSWORD RELEASE_STORE_PASSWORD SIGNING_KEYSTORE_PASSWORD ANDROID_KEYSTORE_PASSWORD SIGNING_PASSWORD SIGNING_KEY_ALIAS KEY_ALIAS ALIAS RELEASE_KEY_ALIAS KEYSTORE_ALIAS SIGNING_ALIAS ANDROID_KEY_ALIAS SIGNING_KEY_PASSWORD KEY_PASSWORD RELEASE_KEY_PASSWORD KEYSTORE_KEY_PASSWORD ANDROID_KEY_PASSWORD; do v="S_$k"; if [ -n "${!v:-}" ]; then SET="$SET $k"; fi; done
+          if [ -z "$KS" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "::error title=signing::no keystore secret found (signing-related secrets set:${SET:- none}); refusing to publish a debug-signed APK"
+              exit 1
+            fi
+            echo "::notice title=signing::no keystore secret found (signing-related secrets set:${SET:- none}); APK is signed with the debug key"
+            exit 0
+          fi
           [ -n "$KP" ] || KP="$SP"   # PKCS12 stores use one password for both
-          for v in "$SP" "$KP" "$AL"; do [ -n "$v" ] && echo "::add-mask::$v"; done
+          for v in "$SP" "$KP"; do if [ -n "$v" ]; then echo "::add-mask::$v"; fi; done
           # tolerate line-wrapped base64 (e.g. `base64 release.jks` without -w0)
           if ! printf '%s' "$KS" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/release.jks" 2>/dev/null || [ ! -s "$RUNNER_TEMP/release.jks" ]; then
-            echo "::error title=signing::keystore secret is not valid base64 (secret names: $NAMES)"; exit 1
+            echo "::error title=signing::keystore secret is not valid base64 (secrets set:$SET)"; exit 1
           fi
-          if [ -z "$SP" ]; then echo "::error title=signing::no keystore password secret found (secret names: $NAMES)"; exit 1; fi
+          if [ -z "$SP" ]; then echo "::error title=signing::no keystore password secret found (secrets set:$SET)"; exit 1; fi
           if [ -z "$AL" ]; then
             # single-entry keystore: use its alias
             AL=$(keytool -list -v -keystore "$RUNNER_TEMP/release.jks" -storepass "$SP" 2>/dev/null | sed -n 's/^Alias name: //p')
-            [ "$(printf '%s\n' "$AL" | grep -c .)" = 1 ] || { echo "::error title=signing::no key alias secret and the keystore has $(printf '%s\n' "$AL" | grep -c .) entries (secret names: $NAMES)"; exit 1; }
+            [ "$(printf '%s\n' "$AL" | grep -c .)" = 1 ] || { echo "::error title=signing::no key alias secret and the keystore has $(printf '%s\n' "$AL" | grep -c .) entries (secrets set:$SET)"; exit 1; }
           fi
           if ! keytool -list -keystore "$RUNNER_TEMP/release.jks" -storepass "$SP" -alias "$AL" >/dev/null 2>"$RUNNER_TEMP/kt.err"; then
-            echo "::error title=signing::keystore/password/alias check failed: $(head -c 300 "$RUNNER_TEMP/kt.err" | tr '\n' ' ') (secret names: $NAMES)"
+            echo "::error title=signing::keystore/password/alias check failed: $(grep -v "Picked up" "$RUNNER_TEMP/kt.err" | head -c 300 | tr '\n' ' ') (secrets set:$SET)"
             exit 1
           fi
           {
@@ -76,7 +107,7 @@ jobs:
             echo "SIGNING_KEY_ALIAS=$AL"
             echo "SIGNING_KEY_PASSWORD=$KP"
           } >> "$GITHUB_ENV"
-          echo "::notice title=signing::release key found (secret names: $NAMES)"
+          echo "::notice title=signing::release key found (secrets set:$SET)"
 
       - name: Build release APK
         run: |
