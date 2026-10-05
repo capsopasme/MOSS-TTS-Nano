@@ -44,13 +44,16 @@ jobs:
           from huggingface_hub import HfApi, snapshot_download
           api = HfApi()
           revs = {}
-          for repo, d, pats in [
-              ("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", "work/src/MOSS-TTS-Nano-100M-ONNX", ["*.onnx", "*.data", "*.json", "tokenizer.model"]),
-              ("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", "work/src/MOSS-Audio-Tokenizer-Nano-ONNX", ["*.onnx", "*.data", "*.json"]),
+          # Pinned to the revisions the app downloads (ModelStore.TTS_REVISION / CODEC_REVISION).
+          for repo, rev, d, pats in [
+              ("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", "f52645cb467506d8e18e746ddd59482685b74e58",
+               "work/src/MOSS-TTS-Nano-100M-ONNX", ["*.onnx", "*.data", "*.json", "tokenizer.model"]),
+              ("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", "ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae",
+               "work/src/MOSS-Audio-Tokenizer-Nano-ONNX", ["*.onnx", "*.data", "*.json"]),
           ]:
-              sha = api.model_info(repo).sha
-              revs[repo] = sha
-              snapshot_download(repo, revision=sha, local_dir=d, allow_patterns=pats)
+              head = api.model_info(repo).sha
+              revs[repo] = rev + ("" if head == rev else f" (upstream main is now {head})")
+              snapshot_download(repo, revision=rev, local_dir=d, allow_patterns=pats)
           print("::notice title=hf revisions::" + " ".join(f"{k}@{v}" for k, v in revs.items()))
           PY
           echo "::notice title=fp32 sizes::$(cd work/src && find . -type f ! -path '*/.cache/*' -printf '%p=%s ' | sort)"
@@ -142,10 +145,10 @@ jobs:
         run: |
           python - <<'PY'
           from huggingface_hub import snapshot_download
-          snapshot_download("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", local_dir="models/fp32/MOSS-TTS-Nano-100M-ONNX",
+          snapshot_download("OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX", revision="f52645cb467506d8e18e746ddd59482685b74e58", local_dir="models/fp32/MOSS-TTS-Nano-100M-ONNX",
                             allow_patterns=["*.json", "tokenizer.model", "moss_tts_prefill.onnx", "moss_tts_decode_step.onnx",
                                             "moss_tts_local_fixed_sampled_frame.onnx", "*shared.data"])
-          snapshot_download("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", local_dir="models/fp32/MOSS-Audio-Tokenizer-Nano-ONNX",
+          snapshot_download("OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX", revision="ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae", local_dir="models/fp32/MOSS-Audio-Tokenizer-Nano-ONNX",
                             allow_patterns=["*.json", "moss_audio_tokenizer_decode_step.onnx", "moss_audio_tokenizer_decode_shared.data"])
           PY
           mkdir -p models/int8old/MOSS-TTS-Nano-100M-ONNX

@@ -16,16 +16,22 @@ object ModelStore {
     const val TTS_REPO = "OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX"
     const val CODEC_REPO = "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX"
     /**
+     * Pinned Hugging Face revisions (the ones the sizes below and the INT8 pack were built from),
+     * so an upstream re-export can't break downloads or mix versions.
+     */
+    const val TTS_REVISION = "f52645cb467506d8e18e746ddd59482685b74e58"
+    const val CODEC_REVISION = "ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae"
+    /**
      * Release that hosts the INT8 pack built by .github/workflows/quantize-int8.yml. A new pack
      * gets a new tag; the expected sizes below make the app re-download changed files.
      */
     const val INT8_PACK_TAG = "models-int8-v2"
     const val INT8_RELEASE_BASE = "https://github.com/capsopasme/MOSS-TTS-Nano/releases/download/$INT8_PACK_TAG"
     // Sizes of the files in the INT8_PACK_TAG release (printed by quantize-int8.yml).
-    private const val INT8_META_SIZE = -1L
-    private const val INT8_PREFILL_SIZE = -1L
-    private const val INT8_DECODE_SIZE = -1L
-    private const val INT8_LOCAL_SIZE = -1L
+    private const val INT8_META_SIZE = 4_010L
+    private const val INT8_PREFILL_SIZE = 186_880_955L
+    private const val INT8_DECODE_SIZE = 186_892_813L
+    private const val INT8_LOCAL_SIZE = 118_117_793L
 
     class RemoteFile(
         val subdir: String,
@@ -75,7 +81,7 @@ object ModelStore {
     )
 
     /** Download size in MB of what synthesis needs (clone encoder excluded). */
-    fun downloadMb(variant: ModelVariant): Long = files(variant).filter { !it.cloneOnly }.sumOf { maxOf(it.size, 0L) } / 1_048_576
+    fun downloadMb(variant: ModelVariant): Long = files(variant).filter { !it.cloneOnly }.sumOf { maxOf(it.size, 0L) } / 1_000_000
 
     fun files(variant: ModelVariant) = if (variant == ModelVariant.FP32) FP32_FILES else INT8_FILES
 
@@ -101,8 +107,8 @@ object ModelStore {
         if (variant == ModelVariant.INT8) {
             "$INT8_RELEASE_BASE/${f.name}"
         } else {
-            val repo = if (f.subdir == TTS_DIR) TTS_REPO else CODEC_REPO
-            "${source.hfBase}/$repo/resolve/main/${f.name}"
+            val (repo, rev) = if (f.subdir == TTS_DIR) TTS_REPO to TTS_REVISION else CODEC_REPO to CODEC_REVISION
+            "${source.hfBase}/$repo/resolve/$rev/${f.name}"
         }
 
     fun downloadedBytes(context: Context, variant: ModelVariant): Long =
