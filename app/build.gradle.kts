@@ -17,21 +17,16 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    val keystorePath = System.getenv("SIGNING_KEYSTORE_FILE")
+    val hasReleaseKey = keystorePath != null && file(keystorePath).exists()
+
     signingConfigs {
-        create("release") {
-            val ks = System.getenv("SIGNING_KEYSTORE_FILE")
-            if (ks != null && file(ks).exists()) {
-                storeFile = file(ks)
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(keystorePath!!)
                 storePassword = System.getenv("SIGNING_STORE_PASSWORD")
                 keyAlias = System.getenv("SIGNING_KEY_ALIAS")
                 keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
-            } else {
-                // No secrets configured: sign with the debug key so the APK is still installable.
-                val debug = getByName("debug")
-                storeFile = debug.storeFile
-                storePassword = debug.storePassword
-                keyAlias = debug.keyAlias
-                keyPassword = debug.keyPassword
             }
         }
     }
@@ -39,7 +34,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            // No secrets configured: sign with the (auto-generated) debug key so the APK installs.
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
         }
     }
 
