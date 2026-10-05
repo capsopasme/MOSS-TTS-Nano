@@ -72,7 +72,7 @@ App 里每次朗读后会显示：首音延迟、RTF、prefill 耗时、LM 每�
 每次构建都会自动检查（结果写在 workflow 的 annotations 里）：
 
 - `tools/check_int8_pack.py`：图改写无损（与官方 FP32 local 图在相同输入下采样出完全相同的帧）；INT8 与 FP32 的 hidden state 余弦相似度（teacher forcing，均值 0.998）。
-- `tools/quality_int8.py`：让每个模型包自由生成，再用官方 FP32 模型给生成的每个音频 token 打分（FP32 似然，用官方 `local_cached_step` 图）。当前结果：FP32 自身 3.504 nat/token，INT8 v2 3.559（+1.6%），旧 INT8 包 3.537。
+- `tools/quality_int8.py`：让每个模型包自由生成，再用官方 FP32 模型给生成的每个音频 token 打分（FP32 似然，用官方 `local_cached_step` 图）。在 ARM64 上（和手机同一类 int8 内核；2 段文本 × 4 个种子配对，标准误约 ±0.015）：FP32 自身 3.499 nat/token，INT8 v2 +0.050（+1.4%），旧 INT8 包 +0.043，两者在误差范围内相同。作为对照，local 层保持 FP32、只量化其余部分的变体是 +0.020，但逐帧 LM 慢约 30%（提交信息里带 `[int8-experiments]` 会重跑这组对照）。
 - `tools/bench_onnx.py` 和 `tools/mock/run_real_model.sh`：在 ARM64 机器上测 FP32 / 旧 INT8 / 新 INT8 的速度（上面的表格）。
 - workflow artifact 里有 FP32 和 INT8 各一段 WAV，可以下载对比试听。
 

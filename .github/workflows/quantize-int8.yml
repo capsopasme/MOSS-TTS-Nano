@@ -59,8 +59,11 @@ jobs:
           echo "::notice title=fp32 sizes::$(cd work/src && find . -type f ! -path '*/.cache/*' -printf '%p=%s ' | sort)"
 
       - name: Quantize
+        env:
+          # mixed-precision local-graph variants, only when asked for in the commit message
+          EXPERIMENTS: ${{ contains(github.event.head_commit.message, '[int8-experiments]') && '1' || '0' }}
         run: |
-          EXPERIMENTS=1 python tools/quantize_int8.py work
+          python tools/quantize_int8.py work
           echo "::notice title=quantize::$(cat work/quantize_report.json | tr -d '\n ')"
 
       - name: Check against FP32 (lossless surgery + quantization error)
@@ -108,6 +111,7 @@ jobs:
           name: int8-experiments
           path: work/exp/
           retention-days: 3
+          if-no-files-found: ignore
 
       - name: Publish release assets
         if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[publish-int8]')
@@ -146,6 +150,7 @@ jobs:
           path: models/int8new
 
       - uses: actions/download-artifact@v5
+        continue-on-error: true
         with:
           name: int8-experiments
           path: exp
@@ -153,6 +158,7 @@ jobs:
       - name: Assemble experiment packs (int8new with a mixed-precision local graph)
         run: |
           for d in exp/*/; do
+            [ -d "$d" ] || continue
             n=$(basename "$d")
             cp -r models/int8new "models/exp_$n"
             cp "$d/moss_tts_local_fixed_sampled_frame.onnx" "models/exp_$n/MOSS-TTS-Nano-100M-ONNX/"
@@ -184,11 +190,14 @@ jobs:
           for pack in fp32 int8old int8new $(cd models && ls -d exp_* 2>/dev/null); do
             [ -f "models/$pack/MOSS-TTS-Nano-100M-ONNX/moss_tts_local_fixed_sampled_frame.onnx" ] || continue
             threads="1 2 4"; [ "$pack" = int8new ] && threads="1 2 3 4"; [[ "$pack" == exp_* ]] && threads="2"
+            all=""
             for t in $threads; do
               r=$(python tools/bench_onnx.py "models/$pack" $t 80)
               echo "$r"
-              echo "::notice title=arm64 $pack t=$t::$r"
+              all="$all $r"
             done
+            # one annotation per pack (GitHub keeps at most 10 notices per step)
+            echo "::notice title=arm64 $pack::$all"
           done
 
       - name: Quality vs FP32 on ARM64 (the phone's int8 kernels; x86 AVX2 kernels saturate differently)
