@@ -97,8 +97,11 @@ class ModelDownloadService : Service() {
         var lastTime = System.currentTimeMillis()
         var speed = 0L
         try {
-            // A model switch must not leave a half-loaded engine around.
-            EngineManager.release()
+            // Only unload when files the loaded engine reads are about to be replaced; downloading
+            // the other variant (or just the clone encoder) must not interrupt reading.
+            val replacesLoadedGraphs = variant == AppSettings(this).variant &&
+                files.any { !it.cloneOnly && !ModelStore.isPresent(this, variant, it) }
+            if (replacesLoadedGraphs) EngineManager.release()
             var doneBefore = 0L
             for (f in files) {
                 if (cancelled) break
@@ -149,21 +152,24 @@ class ModelDownloadService : Service() {
     private fun download(url: String, target: File, expectedSize: Long, onProgress: (Long, Long) -> Boolean) {
         target.parentFile?.mkdirs()
         val part = File(target.path + ".part")
+        // A leftover .part from another pack version can't be resumed.
+        if (expectedSize > 0 && part.length() > expectedSize) part.delete()
         var attempt = 0
         while (true) {
             try {
                 downloadOnce(url, part, onProgress)
+                if (cancelled) return
+                if (expectedSize > 0 && part.length() != expectedSize) {
+                    part.delete() // corrupt / stale partial: start over on the next attempt
+                    throw IOException("${target.name}: size mismatch (expected $expectedSize)")
+                }
+                if (expectedSize <= 0 && part.length() == 0L) throw IOException("${target.name}: empty download")
                 break
             } catch (e: IOException) {
                 if (cancelled || ++attempt >= 5) throw e
                 Log.w(TAG, "retry $attempt for $url: ${e.message}")
                 Thread.sleep(1500L * attempt)
             }
-        }
-        if (cancelled) return
-        if (expectedSize > 0 && part.length() != expectedSize) {
-            part.delete()
-            throw IOException("${target.name}: size ${part.length()} != expected $expectedSize")
         }
         target.delete()
         if (!part.renameTo(target)) throw IOException("rename failed: ${target.path}")

@@ -15,7 +15,17 @@ object ModelStore {
     const val CODEC_DIR = "MOSS-Audio-Tokenizer-Nano-ONNX"
     const val TTS_REPO = "OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX"
     const val CODEC_REPO = "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX"
-    const val INT8_RELEASE_BASE = "https://github.com/capsopasme/MOSS-TTS-Nano/releases/download/models-int8"
+    /**
+     * Release that hosts the INT8 pack built by .github/workflows/quantize-int8.yml. A new pack
+     * gets a new tag; the expected sizes below make the app re-download changed files.
+     */
+    const val INT8_PACK_TAG = "models-int8-v2"
+    const val INT8_RELEASE_BASE = "https://github.com/capsopasme/MOSS-TTS-Nano/releases/download/$INT8_PACK_TAG"
+    // Sizes of the files in the INT8_PACK_TAG release (printed by quantize-int8.yml).
+    private const val INT8_META_SIZE = -1L
+    private const val INT8_PREFILL_SIZE = -1L
+    private const val INT8_DECODE_SIZE = -1L
+    private const val INT8_LOCAL_SIZE = -1L
 
     class RemoteFile(
         val subdir: String,
@@ -26,9 +36,11 @@ object ModelStore {
         val cloneOnly: Boolean = false,
     )
 
+    val MANIFEST = RemoteFile(TTS_DIR, "browser_poc_manifest.json", 503_354)
+
     /** Only the graphs the streaming engine actually uses (skips decode_full / local_decoder / cached_step). */
     val FP32_FILES = listOf(
-        RemoteFile(TTS_DIR, "browser_poc_manifest.json", 503_354),
+        MANIFEST,
         RemoteFile(TTS_DIR, "tts_browser_onnx_meta.json", 4_487),
         RemoteFile(TTS_DIR, "tokenizer.model", 470_897),
         RemoteFile(TTS_DIR, "moss_tts_prefill.onnx", 283_305),
@@ -43,20 +55,27 @@ object ModelStore {
         RemoteFile(CODEC_DIR, "moss_audio_tokenizer_encode.data", 44_507_136, cloneOnly = true),
     )
 
-    /** Produced by .github/workflows/quantize-int8.yml (tools/quantize_int8.py); LM graphs are self-contained int8 files. */
+    /**
+     * Produced by .github/workflows/quantize-int8.yml (tools/quantize_int8.py); LM graphs are
+     * self-contained int8 files, everything else is the official file. Exact sizes double as an
+     * integrity check and make an outdated pack (older tag) show up as "needs download".
+     */
     val INT8_FILES = listOf(
-        RemoteFile(TTS_DIR, "browser_poc_manifest.json", -1),
-        RemoteFile(TTS_DIR, "tts_browser_onnx_meta.json", -1),
-        RemoteFile(TTS_DIR, "tokenizer.model", -1),
-        RemoteFile(TTS_DIR, "moss_tts_prefill.onnx", -1),
-        RemoteFile(TTS_DIR, "moss_tts_decode_step.onnx", -1),
-        RemoteFile(TTS_DIR, "moss_tts_local_fixed_sampled_frame.onnx", -1),
-        RemoteFile(CODEC_DIR, "codec_browser_onnx_meta.json", -1),
-        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_decode_step.onnx", -1),
-        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_decode_shared.data", -1),
-        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_encode.onnx", -1, cloneOnly = true),
-        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_encode.data", -1, cloneOnly = true),
+        MANIFEST,
+        RemoteFile(TTS_DIR, "tts_browser_onnx_meta.json", INT8_META_SIZE),
+        RemoteFile(TTS_DIR, "tokenizer.model", 470_897),
+        RemoteFile(TTS_DIR, "moss_tts_prefill.onnx", INT8_PREFILL_SIZE),
+        RemoteFile(TTS_DIR, "moss_tts_decode_step.onnx", INT8_DECODE_SIZE),
+        RemoteFile(TTS_DIR, "moss_tts_local_fixed_sampled_frame.onnx", INT8_LOCAL_SIZE),
+        RemoteFile(CODEC_DIR, "codec_browser_onnx_meta.json", 17_036),
+        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_decode_step.onnx", 351_400),
+        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_decode_shared.data", 44_198_912),
+        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_encode.onnx", 815_775, cloneOnly = true),
+        RemoteFile(CODEC_DIR, "moss_audio_tokenizer_encode.data", 44_507_136, cloneOnly = true),
     )
+
+    /** Download size in MB of what synthesis needs (clone encoder excluded). */
+    fun downloadMb(variant: ModelVariant): Long = files(variant).filter { !it.cloneOnly }.sumOf { maxOf(it.size, 0L) } / 1_048_576
 
     fun files(variant: ModelVariant) = if (variant == ModelVariant.FP32) FP32_FILES else INT8_FILES
 

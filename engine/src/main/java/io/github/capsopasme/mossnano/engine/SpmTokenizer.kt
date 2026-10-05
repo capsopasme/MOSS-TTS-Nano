@@ -10,7 +10,7 @@ class SpmTokenizer(modelFile: File) : TextTokenizer {
     private var handle: Long
 
     init {
-        ensureLoaded()
+        NativeLib.ensureLoaded()
         require(modelFile.isFile) { "tokenizer model not found: ${modelFile.absolutePath}" }
         handle = nativeLoad(modelFile.absolutePath)
         if (handle == 0L) throw IllegalStateException("Failed to load SentencePiece model ${modelFile.absolutePath}")
@@ -35,18 +35,8 @@ class SpmTokenizer(modelFile: File) : TextTokenizer {
     }
 
     companion object {
-        @Volatile private var loaded = false
-
         /** Optional override for tests on a desktop JVM (absolute path of the shared library). */
         @JvmStatic var libraryPathOverride: String? = null
-
-        @Synchronized
-        private fun ensureLoaded() {
-            if (loaded) return
-            val override = libraryPathOverride
-            if (override != null) System.load(override) else System.loadLibrary("mossnano_jni")
-            loaded = true
-        }
 
         @JvmStatic private external fun nativeLoad(path: String): Long
         @JvmStatic private external fun nativeEncode(handle: Long, text: String): IntArray?

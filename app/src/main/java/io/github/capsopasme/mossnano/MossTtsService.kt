@@ -50,10 +50,15 @@ class MossTtsService : TextToSpeechService() {
         cancel?.cancel()
     }
 
+    private fun localeOf(group: String): Locale = when {
+        group.contains("English", ignoreCase = true) -> Locale.US
+        group.contains("Japanese", ignoreCase = true) -> Locale.JAPAN
+        else -> Locale.SIMPLIFIED_CHINESE // Chinese built-ins and cloned voices
+    }
+
     override fun onGetVoices(): List<Voice> =
         EngineManager.voices(this).map { v ->
-            val locale = if (v.group.contains("English", ignoreCase = true)) Locale.US else Locale.SIMPLIFIED_CHINESE
-            Voice(v.id, locale, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
+            Voice(v.id, localeOf(v.group), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
         }
 
     override fun onIsValidVoiceName(voiceName: String?): Int =
@@ -63,10 +68,18 @@ class MossTtsService : TextToSpeechService() {
 
     override fun onGetDefaultVoiceNameFor(lang: String?, country: String?, variant: String?): String? {
         val voices = EngineManager.voices(this)
-        val wantEnglish = iso3(lang) == "eng"
+        val l = iso3(lang)
         val saved = AppSettings(this).voiceId
-        return voices.firstOrNull { it.id == saved && !wantEnglish }?.id
-            ?: voices.firstOrNull { it.group.contains(if (wantEnglish) "English" else "Chinese", true) }?.id
+        val savedVoice = voices.firstOrNull { it.id == saved }
+        // The voice picked in the app wins whenever it speaks the requested language.
+        if (savedVoice != null && localeOf(savedVoice.group).isO3Language == (l ?: "zho")) return savedVoice.id
+        val wanted = when (l) {
+            "eng" -> "English"
+            "jpn" -> "Japanese"
+            else -> "Chinese"
+        }
+        return voices.firstOrNull { it.group.contains(wanted, true) }?.id
+            ?: savedVoice?.id
             ?: voices.firstOrNull()?.id
     }
 

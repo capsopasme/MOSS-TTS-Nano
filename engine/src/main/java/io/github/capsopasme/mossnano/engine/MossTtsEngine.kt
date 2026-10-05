@@ -39,7 +39,8 @@ class MossTtsEngine private constructor(
 
     private val env: OrtEnvironment = OrtEnv.get(options.lmThreads, options.allowSpinning)
 
-    private val lmOptions = lmSessionOptions(options.lmThreads, options.allowSpinning)
+    private val lmDynamicOptions = lmSessionOptions(options.lmThreads, options.allowSpinning, dynamicShapes = true)
+    private val lmStaticOptions = lmSessionOptions(options.lmThreads, options.allowSpinning, dynamicShapes = false)
     private val codecOptions = codecSessionOptions(options.codecThreads)
     private val prefill: OrtSession
     private val decode: OrtSession
@@ -84,13 +85,15 @@ class MossTtsEngine private constructor(
     private val queue = ArrayBlockingQueue<Msg>(options.maxQueuedFrames.coerceAtLeast(8) + 4)
     private val worker: Thread
     @Volatile private var closed = false
+    /** Cancel signal of the synthesis in flight (so [close] can stop it instead of waiting). */
+    @Volatile private var activeCancel: CancelSignal? = null
     private val synthLock = ReentrantLock()
 
     init {
         val t0 = System.nanoTime()
-        prefill = env.openSession(File(cfg.ttsDir, cfg.prefillFile), lmOptions)
-        decode = env.openSession(File(cfg.ttsDir, cfg.decodeStepFile), lmOptions)
-        local = env.openSession(File(cfg.ttsDir, cfg.localFixedFrameFile), lmOptions)
+        prefill = env.openSession(File(cfg.ttsDir, cfg.prefillFile), lmDynamicOptions)
+        decode = env.openSession(File(cfg.ttsDir, cfg.decodeStepFile), lmDynamicOptions)
+        local = env.openSession(File(cfg.ttsDir, cfg.localFixedFrameFile), lmStaticOptions)
         codecSession = env.openSession(File(cfg.codecDir, cfg.codec.decodeStepFile), codecOptions)
         codec = CodecStreamDecoder(env, codecSession, cfg.codec)
         loadMs = (System.nanoTime() - t0) / 1_000_000
@@ -163,29 +166,44 @@ class MossTtsEngine private constructor(
     fun synthesize(request: SynthRequest, sink: AudioSink, cancel: CancelSignal = CancelSignal()): SynthStats {
         check(!closed) { "engine closed" }
         synthLock.withLock {
+            check(!closed) { "engine closed" }
+            activeCancel = cancel
             val stats = SynthStats().apply { sampleRate = cfg.codec.sampleRate }
             val startNs = System.nanoTime()
             val job = Job(sink, cancel, stats, startNs)
             val runOptions = OrtSession.RunOptions()
             cancel.attach(runOptions)
-            putAlways(Msg.Begin(job))
             try {
-                val chunks = prepareChunks(request.text, request.normalizeText)
-                val rng = SplittableRandom(request.seed ?: System.nanoTime())
-                for ((index, chunk) in chunks.withIndex()) {
-                    if (cancel.isCancelled || job.error != null) break
-                    generateChunk(chunk, request, rng, runOptions, job)
-                    stats.chunks++
-                    val pause = if (index < chunks.lastIndex) TextChunker.pauseSeconds(chunk) else 0.0
-                    if (!put(Msg.ChunkEnd((pause * sampleRate).toInt()), cancel)) break
+                // The calling thread is one of the LM pool's workers: keep it on the big cores too.
+                CpuAffinity.onPerformanceCores(options.pinToPerformanceCores) {
+                    putAlways(Msg.Begin(job))
+                    try {
+                        val chunks = prepareChunks(request.text, request.normalizeText)
+                        val rng = SplittableRandom(request.seed ?: System.nanoTime())
+                        for ((index, chunk) in chunks.withIndex()) {
+                            if (cancel.isCancelled || job.error != null) break
+                            generateChunk(chunk, request, rng, runOptions, job)
+                            stats.chunks++
+                            val pause = if (index < chunks.lastIndex) TextChunker.pauseSeconds(chunk) else 0.0
+                            if (!put(Msg.ChunkEnd((pause * sampleRate).toInt()), cancel)) break
+                        }
+                    } catch (e: OrtException) {
+                        if (!cancel.isCancelled && !closed) {
+                            cancel.cancel() // drop whatever is still queued for this job
+                            throw TtsException("ONNX Runtime error: ${e.message}", e)
+                        }
+                    } catch (t: Throwable) {
+                        cancel.cancel()
+                        throw t
+                    } finally {
+                        putAlways(Msg.Finish)
+                        awaitDone(job)
+                    }
                 }
-            } catch (e: OrtException) {
-                if (!cancel.isCancelled) throw TtsException("ONNX Runtime error: ${e.message}", e)
             } finally {
-                putAlways(Msg.Finish)
-                job.done.await()
                 cancel.detach(runOptions)
                 runOptions.close()
+                activeCancel = null
             }
             job.error?.let { throw TtsException("audio pipeline error: ${it.message}", it) }
             stats.wallMs = (System.nanoTime() - startNs) / 1_000_000
@@ -319,14 +337,24 @@ class MossTtsEngine private constructor(
 
     private fun put(msg: Msg, cancel: CancelSignal): Boolean {
         while (!queue.offer(msg, 50, TimeUnit.MILLISECONDS)) {
-            if (cancel.isCancelled || closed) return false
+            if (cancel.isCancelled || closed || !worker.isAlive) return false
         }
         return true
     }
 
+    /** Control messages (Begin/Finish) must arrive, otherwise the caller would wait forever. */
     private fun putAlways(msg: Msg) {
         while (!queue.offer(msg, 50, TimeUnit.MILLISECONDS)) {
-            if (closed && msg !is Msg.Shutdown) return
+            if (!worker.isAlive) return
+        }
+    }
+
+    private fun awaitDone(job: Job) {
+        while (!job.done.await(200, TimeUnit.MILLISECONDS)) {
+            if (!worker.isAlive) {
+                if (job.error == null) job.error = IllegalStateException("codec thread died")
+                return
+            }
         }
     }
 
@@ -339,6 +367,13 @@ class MossTtsEngine private constructor(
         val silence = FloatArray(4800 * cfg.codec.channels)
 
         fun alive(j: Job) = !j.cancel.isCancelled && j.error == null
+
+        fun fail(j: Job, t: Throwable) {
+            if (j.error == null) j.error = t
+            j.cancel.cancel()
+            pending.clear()
+            runCatching { codec.reset() }
+        }
 
         fun emit(j: Job, buf: FloatArray, frames: Int) {
             if (frames <= 0 || !alive(j)) return
@@ -366,7 +401,11 @@ class MossTtsEngine private constructor(
             if (!alive(j)) pending.clear()
         }
 
-        /** Official adaptive policy (ort_cpu_runtime._resolve_stream_decode_frame_budget). */
+        /**
+         * Official adaptive policy (ort_cpu_runtime._resolve_stream_decode_frame_budget), plus a
+         * 16-frame tier once far ahead: every codec call has a large fixed cost (sliding-window
+         * caches of 500 steps in 12 layers), so big batches roughly halve the codec CPU time.
+         */
         fun budget(): Int {
             if (firstEmitNs == 0L) return 1
             val elapsed = (System.nanoTime() - firstEmitNs) / 1e9
@@ -375,7 +414,8 @@ class MossTtsEngine private constructor(
                 lead < 0.20 -> 1
                 lead < 0.55 -> 2
                 lead < 1.10 -> 4
-                else -> 8
+                lead < 3.00 -> 8
+                else -> 16
             }
         }
 
@@ -383,21 +423,30 @@ class MossTtsEngine private constructor(
             val msg = try {
                 queue.take()
             } catch (_: InterruptedException) {
+                job?.let {
+                    if (it.error == null) it.error = InterruptedException("codec thread interrupted")
+                    it.done.countDown()
+                }
                 return
             }
-            try {
-                when (msg) {
-                    is Msg.Begin -> {
-                        job = msg.job
-                        pending.clear()
-                        codec.reset()
-                        emittedFrames = 0
-                        firstEmitNs = 0
-                        msg.job.sink.onStart(sampleRate, cfg.codec.channels)
+            when (msg) {
+                is Msg.Begin -> {
+                    val j = msg.job
+                    job = j
+                    pending.clear()
+                    runCatching { codec.reset() }
+                    emittedFrames = 0
+                    firstEmitNs = 0
+                    try {
+                        j.sink.onStart(sampleRate, cfg.codec.channels)
+                    } catch (t: Throwable) {
+                        fail(j, t)
                     }
-                    is Msg.Frame -> {
-                        val j = job ?: continue
-                        if (!alive(j)) continue
+                }
+                is Msg.Frame -> {
+                    val j = job ?: continue
+                    if (!alive(j)) continue
+                    try {
                         pending.add(msg.tokens)
                         // Pull any frames that are already waiting, then decode in budget-sized batches.
                         while (true) {
@@ -414,9 +463,13 @@ class MossTtsEngine private constructor(
                             decodeFrames(j, b)
                             b = budget()
                         }
+                    } catch (t: Throwable) {
+                        fail(j, t)
                     }
-                    is Msg.ChunkEnd -> {
-                        val j = job ?: continue
+                }
+                is Msg.ChunkEnd -> {
+                    val j = job ?: continue
+                    try {
                         if (alive(j)) {
                             decodeFrames(j, pending.size)
                             codec.reset()
@@ -428,27 +481,29 @@ class MossTtsEngine private constructor(
                             }
                         }
                         pending.clear()
+                    } catch (t: Throwable) {
+                        fail(j, t)
                     }
-                    is Msg.Finish -> {
-                        val j = job
-                        if (j != null) {
-                            if (alive(j)) decodeFrames(j, pending.size)
-                            pending.clear()
-                            codec.reset()
-                            runCatching { j.sink.onFinish() }
-                            job = null
-                            j.done.countDown()
-                        }
+                }
+                is Msg.Finish -> {
+                    // Whatever happens here, the waiting synthesize() call must be released.
+                    val j = job ?: continue
+                    try {
+                        if (alive(j)) decodeFrames(j, pending.size)
+                    } catch (t: Throwable) {
+                        fail(j, t)
                     }
-                    is Msg.Shutdown -> return
+                    pending.clear()
+                    runCatching { codec.reset() }
+                    try {
+                        j.sink.onFinish()
+                    } catch (t: Throwable) {
+                        if (j.error == null && !j.cancel.isCancelled) j.error = t
+                    }
+                    job = null
+                    j.done.countDown()
                 }
-            } catch (t: Throwable) {
-                job?.let {
-                    it.error = t
-                    it.cancel.cancel()
-                }
-                pending.clear()
-                runCatching { codec.reset() }
+                is Msg.Shutdown -> return
             }
         }
     }
@@ -464,8 +519,9 @@ class MossTtsEngine private constructor(
     fun encodeReferenceAudio(channelMajor: FloatArray, samples: Int): Array<IntArray> {
         val encodeFile = cfg.codec.encodeFile ?: throw MissingModelException("codec meta has no encode graph")
         synthLock.withLock {
+            check(!closed) { "engine closed" }
             val opts = codecSessionOptions(options.lmThreads)
-            opts.use {
+            CpuAffinity.onPerformanceCores(options.pinToPerformanceCores) { opts.use {
                 env.openSession(File(cfg.codecDir, encodeFile), opts).use { enc ->
                     val ch = cfg.codec.channels
                     val wave = directFloats(ch * samples)
@@ -485,13 +541,18 @@ class MossTtsEngine private constructor(
                         }
                     }
                 }
-            }
+            } }
         }
     }
 
+    /**
+     * Releases all native memory. A synthesis in flight is cancelled (not waited for), so this
+     * returns quickly even when called from the UI thread.
+     */
     override fun close() {
         if (closed) return
         closed = true
+        activeCancel?.cancel()
         synthLock.withLock {
             queue.clear()
             queue.offer(Msg.Shutdown)
@@ -500,7 +561,8 @@ class MossTtsEngine private constructor(
             listOf(hiddenLocalIn, hiddenDecodeOut, seenMaskTensor, assistantUTensor, audioUTensor, rowTensor, pastLenTensor)
                 .forEach { runCatching { it.close() } }
             listOf(prefill, decode, local, codecSession).forEach { runCatching { it.close() } }
-            lmOptions.close()
+            lmDynamicOptions.close()
+            lmStaticOptions.close()
             codecOptions.close()
             tokenizer.close()
         }
@@ -515,11 +577,18 @@ class MossTtsEngine private constructor(
         /** Parses only the manifest (no ONNX sessions) to list the built-in voices. */
         fun readBuiltinVoices(root: File): List<VoicePrompt> = ModelConfig.load(root).builtinVoices
 
+        /**
+         * Loads the model. ORT's worker threads and the codec thread are created here and inherit
+         * the calling thread's CPU affinity and priority, so call it from a thread with the
+         * priority the inference threads should have.
+         */
         fun load(options: EngineOptions, tokenizerFactory: (File) -> TextTokenizer, log: (String) -> Unit = {}): MossTtsEngine {
             val cfg = ModelConfig.load(options.modelRoot)
             val tokenizer = tokenizerFactory(cfg.tokenizerFile)
             return try {
-                MossTtsEngine(options, cfg, tokenizer, log)
+                CpuAffinity.onPerformanceCores(options.pinToPerformanceCores) {
+                    MossTtsEngine(options, cfg, tokenizer, log)
+                }
             } catch (t: Throwable) {
                 tokenizer.close()
                 throw t

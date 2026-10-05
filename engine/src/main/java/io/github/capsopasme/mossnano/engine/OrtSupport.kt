@@ -57,10 +57,17 @@ object OrtEnv {
     }
 }
 
-internal fun lmSessionOptions(threadsIfNoGlobalPool: Int, spinning: Boolean): OrtSession.SessionOptions =
+/**
+ * @param dynamicShapes true for prefill / decode_step, whose input shapes change on every
+ *   call (prompt length, growing KV cache). ORT's memory-pattern planner would record a new
+ *   allocation plan for every new shape and keep all of them, which only costs time and
+ *   memory there; it stays on for the fixed-shape local graph.
+ */
+internal fun lmSessionOptions(threadsIfNoGlobalPool: Int, spinning: Boolean, dynamicShapes: Boolean): OrtSession.SessionOptions =
     OrtSession.SessionOptions().apply {
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+        if (dynamicShapes) setMemoryPatternOptimization(false)
         if (OrtEnv.hasGlobalPool) {
             disablePerSessionThreads()
         } else {

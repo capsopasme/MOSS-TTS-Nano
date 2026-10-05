@@ -21,6 +21,8 @@ class EngineOptions(
      * Bounds memory and stops burning CPU far ahead of playback on long texts.
      */
     val maxQueuedFrames: Int = 75,
+    /** Keep ORT's workers, the codec thread and the calling thread off the little cores. */
+    val pinToPerformanceCores: Boolean = true,
 )
 
 fun interface TextTokenizer : Closeable {

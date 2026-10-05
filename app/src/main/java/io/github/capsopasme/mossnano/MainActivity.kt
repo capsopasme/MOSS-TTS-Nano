@@ -63,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.capsopasme.mossnano.engine.CpuAffinity
 import io.github.capsopasme.mossnano.engine.VoicePrompt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -164,7 +165,7 @@ private fun ModelCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
                     onClick = {
                         variant = v
                         settings.variant = v
-                        EngineManager.release()
+                        EngineManager.releaseAsync()
                         onChanged()
                     },
                     label = { Text(v.name) },
@@ -172,13 +173,15 @@ private fun ModelCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
             }
         }
         Text(variant.label, style = MaterialTheme.typography.bodySmall)
-        if (variant == ModelVariant.INT8) {
-            Text(
-                "INT8 版由本仓库 GitHub Actions 从官方 ONNX 动态量化后发布：矩阵权重 int8（ARM 点积指令加速），LM 内存约减半。若音质不满意请切回 FP32。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            if (variant == ModelVariant.INT8) {
+                "推荐。由本仓库 GitHub Actions 从官方 ONNX 量化：LM 全部矩阵权重 int8（走 ARM 点积 / i8mm 整数核），每帧读取的权重约为 FP32 的 1/4，生成更快、更省电；codec 保持官方 FP32。若音质不满意可随时切回 FP32。"
+            } else {
+                "官方原版权重，音质基准；速度和功耗不如 INT8。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text(
             when {
                 ready && cloneReady -> "✅ 已就绪（含音色克隆编码器）"
@@ -216,12 +219,13 @@ private fun ModelCard(settings: AppSettings, refresh: Int, onChanged: () -> Unit
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!ready || (withClone && !cloneReady)) {
                     Button(onClick = { ModelDownloadService.start(context, variant, withClone) }) {
-                        Text(if (ModelStore.downloadedBytes(context, variant) > 0) "继续下载" else "下载（约 ${if (variant == ModelVariant.FP32) "760" else "550"} MB）")
+                        val mb = ModelStore.downloadMb(variant).takeIf { it > 100 } ?: if (variant == ModelVariant.FP32) 680L else 300L
+                        Text(if (ModelStore.downloadedBytes(context, variant) > 0) "继续下载 / 更新" else "下载（约 $mb MB）")
                     }
                 }
                 if (ModelStore.downloadedBytes(context, variant) > 0) {
                     TextButton(onClick = {
-                        EngineManager.release()
+                        EngineManager.releaseAsync()
                         ModelStore.deleteVariant(context, variant)
                         onChanged()
                     }) { Text("删除") }
@@ -381,9 +385,16 @@ private fun PerfCard(settings: AppSettings) {
         LabeledSlider("LM 线程 $lm（骁龙 8 Gen3 推荐 4 = 1 超大核 + 3 大核）", lm.toFloat(), 1f..8f, 6) {
             lm = it.toInt(); settings.lmThreads = lm; needRestart = EngineManager.threadsNeedRestart(settings)
         }
-        LabeledSlider("Codec 线程 $codec（与 LM 并行）", codec.toFloat(), 1f..4f, 2) {
-            codec = it.toInt(); settings.codecThreads = codec; EngineManager.release()
+        LabeledSlider("Codec 线程 $codec（与 LM 并行）", codec.toFloat(), 1f..4f, 2, onFinished = { EngineManager.releaseAsync() }) {
+            codec = it.toInt(); settings.codecThreads = codec
         }
+        val perfCores = remember { CpuAffinity.performanceCores }
+        Text(
+            if (perfCores > 0) "推理线程只跑在 $perfCores 个大核上（已排除小核）。LM + Codec 线程数之和不建议超过 $perfCores。"
+            else "未识别到大小核结构，线程不做绑核。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         SwitchRow("线程自旋等待（更低延迟，略增功耗）", spin) {
             spin = it; settings.spinning = it; needRestart = EngineManager.threadsNeedRestart(settings)
         }
@@ -401,16 +412,23 @@ private fun PerfCard(settings: AppSettings) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { EngineManager.preload() }) { Text("预加载") }
-            OutlinedButton(onClick = { EngineManager.release() }) { Text("释放内存") }
+            OutlinedButton(onClick = { EngineManager.releaseAsync() }) { Text("释放内存") }
         }
     }
 }
 
 @Composable
-private fun LabeledSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, onChange: (Float) -> Unit) {
+private fun LabeledSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onFinished: () -> Unit = {},
+    onChange: (Float) -> Unit,
+) {
     Column {
         Text(label, style = MaterialTheme.typography.bodySmall)
-        Slider(value = value, onValueChange = onChange, valueRange = range, steps = steps)
+        Slider(value = value, onValueChange = onChange, onValueChangeFinished = onFinished, valueRange = range, steps = steps)
     }
 }
 

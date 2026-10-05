@@ -18,8 +18,18 @@ object TextNormalizer {
     fun normalize(text: String): String {
         var t = Robust.normalize(text)
         if (t.isEmpty()) return t
-        t = if (TextChunker.containsCjk(t)) ZhTn.normalize(t) else EnTn.normalize(t)
+        t = if (useEnglishTn(t)) EnTn.normalize(t) else ZhTn.normalize(t)
         return Robust.normalize(t)
+    }
+
+    /**
+     * Same language decision as the official pipeline
+     * (text_normalization_pipeline.resolve_text_normalization_language): Han characters -> zh,
+     * otherwise Latin letters -> en, otherwise zh. So "12:30" or "123" are read in Chinese.
+     */
+    internal fun useEnglishTn(text: String): Boolean {
+        if (text.any { it in '㐀'..'鿿' }) return false
+        return text.any { it in 'A'..'Z' || it in 'a'..'z' }
     }
 
     // =====================================================================================
@@ -487,18 +497,37 @@ object TextNormalizer {
         private val PERCENT = Regex("(\\d+(?:\\.\\d+)?)\\s*%")
         private val ORDINAL = Regex("(?<![\\d.])(\\d+)(st|nd|rd|th)\\b")
         private val TIME = Regex("(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
+        private val ISO_DATE = Regex("(?<![\\d-])(\\d{4})-(\\d{1,2})-(\\d{1,2})(?![\\d-])")
         private val YEAR = Regex("(?<![\\d.,])(1[1-9]\\d\\d|20\\d\\d)(?![\\d.,]|\\s*%)")
-        private val NUMBER = Regex("(-)?(\\d+)(?:\\.(\\d+))?")
-        private val CURRENCY_WORDS = mapOf("$" to "dollars", "€" to "euros", "£" to "pounds")
+        /** "10-20" -> "10 to 20" (otherwise the hyphen would be read as "minus"). */
+        private val RANGE = Regex("(\\d)\\s*[-–~]\\s*(?=\\d)")
+        /** "COVID-19" -> "COVID 19". */
+        private val WORD_HYPHEN_NUMBER = Regex("([A-Za-z])-(?=\\d)")
+        /** A leading "-" is a minus sign only when it isn't glued to a word or number. */
+        private val NUMBER = Regex("(?:(?<![A-Za-z0-9])(-))?(\\d+)(?:\\.(\\d+))?")
+        private val CURRENCY_WORDS = mapOf("$" to ("dollar" to "dollars"), "€" to ("euro" to "euros"), "£" to ("pound" to "pounds"))
+        private val MONTHS = arrayOf(
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        )
 
         fun normalize(input: String): String {
             val protected = ArrayList<String>()
             var t = protectForTn(input, protected)
             t = THOUSANDS.replace(t) { it.value.replace(",", "") }
             t = CURRENCY.replace(t) { m ->
-                val unit = CURRENCY_WORDS.getValue(m.groupValues[1])
-                val cents = m.groupValues[3]
-                cardinal(m.groupValues[2]) + " " + unit + if (cents.isNotEmpty() && cents.toInt() > 0) " " + cardinal(cents) + " cents" else ""
+                val (one, many) = CURRENCY_WORDS.getValue(m.groupValues[1])
+                val amount = m.groupValues[2]
+                val cents = m.groupValues[3].let { if (it.length == 1) it + "0" else it }
+                val main = cardinal(amount) + " " + if (amount.trimStart('0') == "1") one else many
+                main + if (cents.isNotEmpty() && cents.toInt() > 0) {
+                    " " + cardinal(cents) + if (cents.toInt() == 1) " cent" else " cents"
+                } else ""
+            }
+            t = ISO_DATE.replace(t) { m ->
+                val mo = m.groupValues[2].toInt()
+                val d = m.groupValues[3].toInt()
+                if (mo in 1..12 && d in 1..31) "${MONTHS[mo - 1]} ${ordinal(d.toString())}, ${year(m.groupValues[1])}" else m.value
             }
             t = PERCENT.replace(t) { m -> m.groupValues[1] + " percent" }
             t = ORDINAL.replace(t) { m -> ordinal(m.groupValues[1]) }
@@ -510,6 +539,8 @@ object TextNormalizer {
                     else -> " " + cardinal(mi.toString())
                 }
             }
+            t = RANGE.replace(t) { m -> m.groupValues[1] + " to " }
+            t = WORD_HYPHEN_NUMBER.replace(t) { m -> m.groupValues[1] + " " }
             t = YEAR.replace(t) { m -> year(m.groupValues[1]) }
             t = NUMBER.replace(t) { m ->
                 val neg = if (m.groupValues[1].isNotEmpty()) "minus " else ""

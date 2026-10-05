@@ -3,7 +3,9 @@ package io.github.capsopasme.mossnano
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.util.Log
+import io.github.capsopasme.mossnano.engine.CpuAffinity
 import io.github.capsopasme.mossnano.engine.EngineOptions
 import io.github.capsopasme.mossnano.engine.MossTtsEngine
 import io.github.capsopasme.mossnano.engine.OrtEnv
@@ -45,7 +47,7 @@ object EngineManager {
     private val unloadRunnable = Runnable {
         if (users.get() == 0) {
             Log.i(TAG, "idle timeout -> unloading engine")
-            release()
+            releaseAsync()
         }
     }
 
@@ -89,6 +91,11 @@ object EngineManager {
             throw IllegalStateException("model not downloaded")
         }
         _state.value = State.Loading
+        // ORT's worker threads (global LM pool + codec pool) and the codec thread are created during
+        // load and inherit this thread's priority: give them audio priority, then restore ours.
+        val tid = Process.myTid()
+        val previousPriority = runCatching { Process.getThreadPriority(tid) }.getOrDefault(Process.THREAD_PRIORITY_DEFAULT)
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
         return try {
             val e = MossTtsEngine.load(
                 EngineOptions(
@@ -101,20 +108,28 @@ object EngineManager {
                 log = { Log.i(TAG, it) },
             )
             val t0 = System.nanoTime()
-            e.warmup()
+            try {
+                e.warmup()
+            } catch (t: Throwable) {
+                e.close()
+                throw t
+            }
             val warmMs = (System.nanoTime() - t0) / 1_000_000
             engine = e
             engineVariant = variant
             _state.value = State.Ready(variant, e.loadMs, warmMs)
-            Log.i(TAG, "engine ready: load=${e.loadMs}ms warmup=${warmMs}ms")
+            Log.i(TAG, "engine ready: load=${e.loadMs}ms warmup=${warmMs}ms perfCores=${CpuAffinity.performanceCores}")
             e
         } catch (t: Throwable) {
             Log.e(TAG, "engine load failed", t)
             _state.value = State.Error(t.message ?: t.toString())
             throw t
+        } finally {
+            runCatching { Process.setThreadPriority(previousPriority) }
         }
     }
 
+    /** Blocking. Cancels a synthesis in flight (it ends with "stopped") and frees the model memory. */
     fun release() {
         synchronized(lock) {
             engine?.close()
@@ -124,12 +139,36 @@ object EngineManager {
         }
     }
 
-    /** Built-in voices of the selected variant (manifest only) + cloned voices. */
+    /** Same as [release] but never blocks the caller (for the UI thread). */
+    fun releaseAsync() {
+        thread(name = "moss-release") { runCatching { release() } }
+    }
+
+    private class VoiceCacheKey(val variant: ModelVariant, val path: String, val modified: Long, val length: Long) {
+        fun matches(o: VoiceCacheKey) = variant == o.variant && path == o.path && modified == o.modified && length == o.length
+    }
+
+    @Volatile private var voiceCache: Pair<VoiceCacheKey, List<VoicePrompt>>? = null
+
+    /**
+     * Built-in voices of the selected variant + cloned voices. The TTS framework asks for voices
+     * several times per utterance, so the (500 KB) manifest is parsed once and cached.
+     */
     fun voices(context: Context): List<VoicePrompt> {
         val variant = AppSettings(context).variant
         val builtin = synchronized(lock) { engine?.takeIf { engineVariant == variant }?.builtinVoices }
-            ?: runCatching { MossTtsEngine.readBuiltinVoices(ModelStore.root(context, variant)) }.getOrDefault(emptyList())
+            ?: cachedBuiltinVoices(context, variant)
         return builtin + VoiceStore.list(context)
+    }
+
+    private fun cachedBuiltinVoices(context: Context, variant: ModelVariant): List<VoicePrompt> {
+        val manifest = ModelStore.file(context, variant, ModelStore.MANIFEST)
+        if (!manifest.isFile) return emptyList()
+        val key = VoiceCacheKey(variant, manifest.path, manifest.lastModified(), manifest.length())
+        voiceCache?.let { (k, v) -> if (k.matches(key)) return v }
+        val voices = runCatching { MossTtsEngine.readBuiltinVoices(ModelStore.root(context, variant)) }.getOrDefault(emptyList())
+        if (voices.isNotEmpty()) voiceCache = key to voices
+        return voices
     }
 
     fun resolveVoice(context: Context, id: String?): VoicePrompt? {

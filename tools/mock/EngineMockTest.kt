@@ -1,7 +1,9 @@
 // Desktop-JVM test of the engine against mock graphs (see make_mock_models.py).
-// Run: see tools/mock/README.md
+// Run: bash tools/mock/run_mock_test.sh
 import io.github.capsopasme.mossnano.engine.AudioSink
 import io.github.capsopasme.mossnano.engine.CancelSignal
+import io.github.capsopasme.mossnano.engine.CpuAffinity
+import io.github.capsopasme.mossnano.engine.TtsException
 import io.github.capsopasme.mossnano.engine.EngineOptions
 import io.github.capsopasme.mossnano.engine.MossTtsEngine
 import io.github.capsopasme.mossnano.engine.SpmTokenizer
@@ -41,6 +43,27 @@ fun main(args: Array<String>) {
         "请求接入-身份判定，GPU-A100 和 v2.3.1 版本",
     )
     for (c in cases) println("  ${c.replace("\n", "\\n")}\n    -> ${TextNormalizer.normalize(c)}")
+    fun tn(s: String) = TextNormalizer.normalize(s)
+    check(tn("12:30") == "十二点三十分。", "digits-only text is read in Chinese like the official pipeline: ${tn("12:30")}")
+    check(tn("pages 10-20 and room A-3").contains("ten to twenty") && !tn("pages 10-20 and room A-3").contains("minus"),
+        "English ranges / word-number hyphens are not read as minus: ${tn("pages 10-20 and room A-3")}")
+    check(tn("It costs \$1.05, at -3 degrees").contains("one dollar five cents") && tn("It costs \$1.05, at -3 degrees").contains("minus three"),
+        "currency singular + real minus: ${tn("It costs \$1.05, at -3 degrees")}")
+    check(tn("from 1990-2000, on 2024-05-01").contains("nineteen ninety to two thousand") && tn("from 1990-2000, on 2024-05-01").contains("May first, twenty twenty-four"),
+        "year ranges and ISO dates: ${tn("from 1990-2000, on 2024-05-01")}")
+
+    println("== cpu affinity")
+    val fake = File(System.getProperty("java.io.tmpdir"), "fake_cpu_${System.nanoTime()}").apply { mkdirs() }
+    File(fake, "possible").writeText("0-7\n")
+    val caps = listOf(325, 325, 870, 870, 870, 870, 870, 1024) // 2 little + 5 mid + 1 prime
+    caps.forEachIndexed { i, c -> File(fake, "cpu$i").mkdirs(); File(fake, "cpu$i/cpu_capacity").writeText("$c\n") }
+    check(CpuAffinity.computePerformanceMask(fake) == 0b11111100L, "little cluster excluded: ${java.lang.Long.toBinaryString(CpuAffinity.computePerformanceMask(fake))}")
+    caps.indices.forEach { File(fake, "cpu$it/cpu_capacity").writeText("1024\n") }
+    check(CpuAffinity.computePerformanceMask(fake) == 0L, "homogeneous SoC -> no pinning")
+    fake.deleteRecursively()
+    val before = CpuAffinity.currentThreadMask()
+    check(before != 0L, "sched_getaffinity through JNI: ${java.lang.Long.toBinaryString(before)}")
+    check(CpuAffinity.setCurrentThreadMask(before) && CpuAffinity.currentThreadMask() == before, "sched_setaffinity round trip")
 
     println("== chunker")
     val long = "今天天气很好。我们一起去公园散步吧！这是一个流式语音合成的测试，模型运行在手机上，速度很快，效果自然。"
@@ -136,7 +159,35 @@ fun main(args: Array<String>) {
     threads.forEach { it.join(20_000) }
     check(threads.none { it.isAlive }, "concurrent synthesize() calls complete")
 
+    // ---- a failing sink surfaces as an error instead of hanging the caller
+    val failing = runCatching {
+        engine.synthesize(SynthRequest("你好。世界。", voice, normalizeText = false), object : AudioSink {
+            override fun onAudio(samples: FloatArray, frames: Int) = true
+            override fun onFinish() = throw IllegalStateException("disk full")
+        })
+    }
+    check(failing.exceptionOrNull() is TtsException, "sink.onFinish failure -> TtsException (${failing.exceptionOrNull()?.message})")
+    val afterFail = engine.synthesize(SynthRequest("你好。", voice, normalizeText = false), object : AudioSink {
+        override fun onAudio(samples: FloatArray, frames: Int) = true
+    })
+    check(afterFail.frames == framesPerChunk, "engine healthy after sink failure")
+
+    // ---- close() while a (slow) synthesis is in flight returns quickly instead of waiting for it
+    var finished = false
+    val slow = Thread {
+        runCatching {
+            engine.synthesize(SynthRequest(text, voice, normalizeText = false), object : AudioSink {
+                override fun onAudio(samples: FloatArray, frames: Int): Boolean { Thread.sleep(50); return true }
+            })
+        }
+        finished = true
+    }.apply { start() }
+    Thread.sleep(300)
+    val tc = System.nanoTime()
     engine.close()
+    val closeMs = (System.nanoTime() - tc) / 1_000_000
+    slow.join(5_000)
+    check(closeMs < 1500 && finished && !slow.isAlive, "close() during synthesis cancels it (${closeMs}ms)")
     println(if (failures == 0) "ALL PASSED" else "$failures FAILURE(S)")
     exitProcess(if (failures == 0) 0 else 1)
 }

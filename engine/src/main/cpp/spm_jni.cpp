@@ -1,5 +1,12 @@
-// Minimal JNI bridge to google/sentencepiece for MOSS-TTS-Nano's tokenizer.model.
+// Minimal JNI bridge to google/sentencepiece for MOSS-TTS-Nano's tokenizer.model,
+// plus per-thread CPU affinity helpers (used to keep the inference threads off the
+// little cores).
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <jni.h>
+#include <errno.h>
+#include <sched.h>
 
 #include <memory>
 #include <string>
@@ -83,6 +90,30 @@ Java_io_github_capsopasme_mossnano_engine_SpmTokenizer_nativeVocabSize(JNIEnv*, 
 JNIEXPORT void JNICALL
 Java_io_github_capsopasme_mossnano_engine_SpmTokenizer_nativeFree(JNIEnv*, jclass, jlong handle) {
   delete reinterpret_cast<sentencepiece::SentencePieceProcessor*>(handle);
+}
+
+// Affinity of the *calling thread* (pid 0 = calling thread for sched_*affinity on Linux).
+// Threads created afterwards by this thread (e.g. ONNX Runtime's pools) inherit it.
+JNIEXPORT jint JNICALL
+Java_io_github_capsopasme_mossnano_engine_CpuAffinity_nativeSetCurrentThreadMask(JNIEnv*, jclass, jlong mask) {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (int i = 0; i < 64; ++i) {
+    if ((static_cast<unsigned long long>(mask) >> i) & 1ULL) CPU_SET(i, &set);
+  }
+  return sched_setaffinity(0, sizeof(set), &set) == 0 ? 0 : errno;
+}
+
+JNIEXPORT jlong JNICALL
+Java_io_github_capsopasme_mossnano_engine_CpuAffinity_nativeGetCurrentThreadMask(JNIEnv*, jclass) {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (sched_getaffinity(0, sizeof(set), &set) != 0) return 0;
+  unsigned long long mask = 0;
+  for (int i = 0; i < 64; ++i) {
+    if (CPU_ISSET(i, &set)) mask |= (1ULL << i);
+  }
+  return static_cast<jlong>(mask);
 }
 
 }  // extern "C"

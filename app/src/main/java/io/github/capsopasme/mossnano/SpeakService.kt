@@ -179,14 +179,18 @@ class SpeakService : Service() {
                     .build()
             )
             .setOnAudioFocusChangeListener { change ->
-                if (change == AudioManager.AUDIOFOCUS_LOSS) {
+                // LOSS_TRANSIENT = phone call, voice assistant, another app's speech: there is no
+                // pause/resume here, so stop rather than talk over it. CAN_DUCK is handled by the system.
+                if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
                     cancel.cancel()
                     currentSink?.abort()
                 }
             }
             .build()
         focusRequest = req
-        audioManager.requestAudioFocus(req)
+        if (audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
+            Log.w(TAG, "audio focus denied (call in progress?)")
+        }
     }
 
     private fun abandonFocus() {
