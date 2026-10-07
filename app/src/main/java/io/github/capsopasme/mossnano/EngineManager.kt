@@ -34,8 +34,10 @@ object EngineManager {
     val state: StateFlow<State> = _state
 
     private val lock = Object()
-    private var engine: MossTtsEngine? = null
-    private var engineVariant: ModelVariant? = null
+
+    // written under [lock]; volatile so [voices] can read them without waiting for a load
+    @Volatile private var engine: MossTtsEngine? = null
+    @Volatile private var engineVariant: ModelVariant? = null
     private val users = AtomicInteger(0)
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var app: Context
@@ -157,7 +159,12 @@ object EngineManager {
      */
     fun voices(context: Context): List<VoicePrompt> {
         val variant = AppSettings(context).variant
-        val builtin = synchronized(lock) { engine?.takeIf { engineVariant == variant }?.builtinVoices }
+        // No lock: the TTS framework calls this on its binder threads (a client connecting asks
+        // for the default voice), and [lock] is held for the seconds a model takes to load. A
+        // client connecting meanwhile (the PhoneAssistant call warming the engine up while
+        // another app loads it) would hang until then. Built-in voices are plain config data.
+        val e = engine
+        val builtin = e?.takeIf { engineVariant == variant }?.builtinVoices
             ?: cachedBuiltinVoices(context, variant)
         return builtin + VoiceStore.list(context)
     }

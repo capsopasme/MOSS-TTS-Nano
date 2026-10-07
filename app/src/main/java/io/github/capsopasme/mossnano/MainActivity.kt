@@ -8,7 +8,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Debug
+import android.os.PowerManager
 import android.os.Process
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -67,6 +69,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.capsopasme.mossnano.engine.CpuAffinity
 import io.github.capsopasme.mossnano.engine.VoicePrompt
@@ -121,6 +125,7 @@ private fun MainScreen() {
         CloneCard(settings, refresh) { refresh++ }
         PerfCard(settings)
         SystemTtsCard()
+        BackgroundCard()
         Spacer(Modifier.padding(8.dp))
     }
 }
@@ -543,19 +548,82 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     }
 }
 
+@Suppress("DEPRECATION")
+private fun isPreferredEngine(context: Context): Boolean =
+    Settings.Secure.getString(context.contentResolver, Settings.Secure.TTS_DEFAULT_SYNTH) == context.packageName
+
+/** starts the first intent the system can open; false if none */
+private fun startFirst(context: Context, vararg intents: Intent): Boolean {
+    for (i in intents) {
+        if (runCatching { context.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess) return true
+    }
+    return false
+}
+
 @Composable
 private fun SystemTtsCard() {
     val context = LocalContext.current
+    var preferred by remember { mutableStateOf(isPreferredEngine(context)) }
+    // back from the system settings: show what was picked there
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { preferred = isPreferredEngine(context) }
     SectionCard("系统 TTS 引擎") {
         Text(
-            "设为系统首选引擎后，阅读器（如 Anx Reader）、导航和其他 App 都能用它朗读，同样是边生成边播放。也可以在任意 App 里选中文字 →「MOSS 朗读」。",
+            "设为系统首选引擎后，阅读器（如 Anx Reader）、导航、语音助手和其他 App 都能用它朗读，同样是边生成边播放。也可以在任意 App 里选中文字 →「MOSS 朗读」。",
             style = MaterialTheme.typography.bodySmall,
         )
+        Text(
+            if (preferred) "✅ 已是系统首选引擎"
+            else "还不是系统首选引擎。ColorOS 上这个设置藏得比较深，在系统设置里搜“文字转语音”最快；有 root 时也可以在语音助手里一键设置，或执行：\nsettings put secure tts_default_synth ${context.packageName}",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (preferred) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         OutlinedButton(onClick = {
-            runCatching {
-                context.startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }.onFailure { Toast.makeText(context, "请在 设置 → 系统 → 语言 → 文字转语音 中选择", Toast.LENGTH_LONG).show() }
+            val ok = startFirst(
+                context,
+                Intent("com.android.settings.TTS_SETTINGS"),
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+                Intent(Settings.ACTION_SETTINGS),
+            )
+            if (!ok) Toast.makeText(context, "请在系统设置里搜索“文字转语音”", Toast.LENGTH_LONG).show()
         }) { Text("打开系统 TTS 设置") }
+    }
+}
+
+/**
+ * As the system engine, MOSS is started by other apps, often in the background (a reader with
+ * the screen off, the assistant's voice call). ColorOS freezes background apps and blocks one app
+ * from starting another unless allowed.
+ */
+@Composable
+private fun BackgroundCard() {
+    val context = LocalContext.current
+    val pm = remember { context.getSystemService(PowerManager::class.java) }
+    var unrestricted by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(context.packageName)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { unrestricted = pm.isIgnoringBatteryOptimizations(context.packageName) }
+    val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+    SectionCard("后台运行") {
+        Text(
+            if (unrestricted) "✅ 不受电池优化限制" else "受电池优化限制：熄屏或在后台朗读时，系统可能推迟或掐断它",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            "给阅读器、语音助手当朗读引擎时，MOSS 是被别的 App 叫起来的。ColorOS 等系统除了电池优化还有自己的后台管理：在应用详情里打开“允许自动启动”“允许关联启动”，耗电管理选“允许完全后台行为”（名字随版本略有不同）。不设的话，别的 App 可能连不上朗读引擎（只显示文字不出声），熄屏朗读也可能被掐断。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!unrestricted) {
+                Button(onClick = {
+                    startFirst(
+                        context,
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")),
+                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                        details,
+                    )
+                }) { Text("取消电池优化") }
+            }
+            OutlinedButton(onClick = { startFirst(context, details) }) { Text("应用详情") }
+        }
     }
 }
 
