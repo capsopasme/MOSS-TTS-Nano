@@ -60,7 +60,8 @@ App 里每次朗读后会显示：首音延迟、RTF、prefill 耗时、LM 每�
    adb push MOSS-Audio-Tokenizer-Nano-ONNX /sdcard/Android/data/io.github.capsopasme.mossnano/files/models/fp32/
    ```
 3. 输入文字 →「朗读」。首次朗读会加载模型并预热（几秒）。
-4. 想全局使用：系统设置 → 文字转语音 → 首选引擎选 MOSS-TTS-Nano。
+4. 想全局使用：系统设置 → 文字转语音 → 首选引擎选 MOSS-TTS-Nano（ColorOS 上这个设置藏得比较深，在系统设置里搜“文字转语音”；有 root 也可以 `settings put secure tts_default_synth io.github.capsopasme.mossnano`）。App 里「系统 TTS 引擎」卡片会显示现在是不是首选引擎。
+5. ColorOS 等会管控后台的系统：在 App 的「后台运行」卡片里取消电池优化，再到应用详情里打开“允许自动启动”“允许关联启动”、耗电管理选“允许完全后台行为”。当系统 TTS 时 MOSS 是被别的 App 在后台叫起来的，不放行的话阅读器、语音助手可能连不上引擎（只显示文字不出声），熄屏朗读也可能被掐断。
 
 ## INT8 模型包
 
